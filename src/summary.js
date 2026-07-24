@@ -47,10 +47,11 @@ function startScheduler(client) {
   cron.schedule(
     '5 * * * *',
     async () => {
-      const hour = dayjs().hour();
+      // ต้องอ่านเวลาไทยตรงๆ ด้วย .tz() — cron ยิงตามเวลาไทย แต่ dayjs() เปล่าๆ ใช้เวลาเครื่อง (มัก UTC บน cloud)
+      const hour = dayjs().tz().hour();
       const due = groupsDueForSummary(hour);
       if (!due.length) return;
-      const today = dayjs().format('YYYY-MM-DD');
+      const today = dayjs().tz().format('YYYY-MM-DD');
       for (const g of due) {
         try {
           await pushDailySummary(client, g, today, 'วันนี้');
@@ -58,7 +59,7 @@ function startScheduler(client) {
           console.error(`[summary] ${g.id}:`, e.message);
         }
       }
-      const used = pushCount(dayjs().format('YYYY-MM'));
+      const used = pushCount(dayjs().tz().format('YYYY-MM'));
       if (used >= 250) await sendTelegram(`⚠️ line-group-bot ใช้ push แล้ว ${used}/300 เดือนนี้ ใกล้เต็มโควต้าฟรี`);
     },
     { timezone: 'Asia/Bangkok' },
