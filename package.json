@@ -1,0 +1,29 @@
+{
+  "name": "line-group-bot",
+  "version": "1.0.0",
+  "description": "บอทเลขากลุ่ม LINE — เก็บ log แชทในกลุ่ม สรุปรายวัน ค้นหาย้อนหลัง ดักจับยอดเงิน ตอบคำถามในกลุ่ม",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "seed": "node scripts/seed-mock.js",
+    "demo": "node scripts/seed-mock.js && node src/index.js",
+    "test": "node test/run.js"
+  },
+  "keywords": ["line", "chatbot", "messaging-api", "group", "summary", "dashboard"],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@line/bot-sdk": "^11.2.0",
+    "better-sqlite3": "^12.11.1",
+    "dayjs": "^1.11.21",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "node-cron": "^4.6.0",
+    "openai": "^6.47.0",
+    "pdf-parse": "^1.1.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

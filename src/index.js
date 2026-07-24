@@ -1,0 +1,271 @@
+require('dotenv').config();
+const express = require('express');
+const line = require('@line/bot-sdk');
+const path = require('path');
+const dayjs = require('./time');
+const {
+  db,
+  ensureGroup,
+  setGroupName,
+  deactivateGroup,
+  upsertMember,
+  memberName,
+  logMessage,
+  deleteByLineMsgId,
+  logExtract,
+  pushCount,
+} = require('./db');
+const { handleCommand, summarizeDay } = require('./commands');
+const { getGroupSummary, getGroupMemberProfile, getRoomMemberProfile, getBotInfo } = require('./lineapi');
+const { startScheduler, pushDailySummary } = require('./summary');
+const { extractMoney } = require('./extract');
+const { processMedia } = require('./media');
+const { welcomeFlex } = require('./flex');
+const { renderDashboard } = require('./dashboard');
+
+// handleCommand คืนได้ทั้ง string / message object (การ์ด) / array → ทำให้เป็น messages เสมอ
+function toMessages(answer) {
+  if (Array.isArray(answer)) return answer;
+  if (typeof answer === 'string') return [{ type: 'text', text: answer.slice(0, 4900) }];
+  return [answer]; // การ์ด Flex
+}
+
+// เตือนคีย์ที่ยังไม่ได้ตั้ง แต่ไม่ปิดเซิร์ฟเวอร์ — จะได้เปิดแดชบอร์ด (โหมด demo) ได้แม้ยังไม่ผูกไลน์
+// ฟีเจอร์ที่ต้องใช้แต่ละคีย์: LINE_* = รับ/ตอบข้อความในกลุ่ม, OPENROUTER_API_KEY = สรุป/ตอบด้วย AI
+const missing = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'OPENROUTER_API_KEY'].filter((k) => !process.env[k]);
+if (missing.length) {
+  console.warn(`⚠️  ยังไม่ได้ตั้งค่า: ${missing.join(', ')} — บอทไลน์จะยังไม่ทำงานจนกว่าจะตั้งครบ (แดชบอร์ด /admin ยังเปิดดูได้) ดูวิธีใน README.md`);
+}
+
+const middlewareConfig = { channelSecret: process.env.LINE_CHANNEL_SECRET };
+const client = new line.messagingApi.MessagingApiClient({
+  channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
+});
+
+let botUserId = null; // ไว้เช็คว่าโดน mention ไหม — ดึงตอน start
+
+const app = express();
+
+// ---------- helpers ----------
+
+// ข้อความที่ไม่ใช่ text → เก็บ placeholder ไว้ก่อน แล้ว processMedia ค่อยอ่านจริงแบบ async
+function placeholder(message) {
+  switch (message.type) {
+    case 'image':
+      return '[รูป]';
+    case 'sticker': {
+      // สติกเกอร์มี keyword อารมณ์ติดมา (บางตัว) — จดไว้ให้สรุปรู้บรรยากาศ
+      const kw = (message.keywords || []).slice(0, 3).join(' ');
+      return kw ? `[สติกเกอร์: ${kw}]` : '[สติกเกอร์]';
+    }
+    case 'video':
+      return '[วิดีโอ]';
+    case 'audio':
+      return '[เสียงพูด]';
+    case 'file':
+      return `[ไฟล์] ${message.fileName || ''}`.trim();
+    case 'location':
+      return `[ตำแหน่ง] ${[message.title, message.address].filter(Boolean).join(' ')}`.trim();
+    default:
+      return `[${message.type}]`;
+  }
+}
+
+// โดน mention ไหม → คืนข้อความที่ตัดชื่อบอทออก (null = ไม่โดน)
+function mentionQuestion(message, selfId) {
+  const men = message.mention?.mentionees || [];
+  const mine = men.find((m) => m.isSelf === true || (selfId && m.userId === selfId));
+  if (!mine) return null;
+  const t = message.text || '';
+  return (t.slice(0, mine.index) + t.slice(mine.index + mine.length)).trim();
+}
+
+// จำชื่อสมาชิก — ยังไม่รู้จักค่อยยิง API (คนไม่ยินยอมเปิดโปรไฟล์จะ 404 ก็ปล่อยเป็น "ไม่ทราบชื่อ")
+async function rememberMember(srcType, srcId, userId) {
+  if (!userId || memberName(srcId, userId) !== 'ไม่ทราบชื่อ') return;
+  try {
+    const p =
+      srcType === 'room' ? await getRoomMemberProfile(srcId, userId) : await getGroupMemberProfile(srcId, userId);
+    if (p?.displayName) upsertMember(srcId, userId, p.displayName);
+  } catch {
+    /* โปรไฟล์ปิด — ข้าม */
+  }
+}
+
+async function refreshGroupName(srcType, srcId) {
+  if (srcType !== 'group') return 'แชทกลุ่มย่อย'; // room ไม่มี API ชื่อ
+  try {
+    const s = await getGroupSummary(srcId);
+    if (s?.groupName) {
+      setGroupName(srcId, s.groupName);
+      return s.groupName;
+    }
+  } catch {
+    /* ignore */
+  }
+  return db.prepare(`SELECT name FROM groups WHERE id = ?`).get(srcId)?.name || 'กลุ่ม';
+}
+
+// ---------- webhook ----------
+// ตั้ง LINE_CHANNEL_SECRET แล้วค่อยเปิด /webhook (โหมด demo ไม่มี secret → แดชบอร์ดยังทำงาน)
+if (process.env.LINE_CHANNEL_SECRET) {
+  app.post('/webhook', line.middleware(middlewareConfig), (req, res) => {
+    res.sendStatus(200); // ตอบ LINE ก่อน ค่อยประมวลผล (กัน timeout)
+    for (const event of req.body.events || []) {
+      handleEvent(event).catch((e) => console.error('[event]', e.message));
+    }
+  });
+} else {
+  app.post('/webhook', (_req, res) => res.status(503).send('LINE ยังไม่ได้ตั้งค่า — ดู README.md'));
+}
+
+async function handleEvent(event) {
+  const src = event.source || {};
+  const srcType = src.type; // 'user' | 'group' | 'room'
+  const srcId = src.groupId || src.roomId;
+
+  // --- บอทถูกเชิญเข้ากลุ่ม ---
+  if (event.type === 'join' && srcId) {
+    ensureGroup(srcId);
+    const name = await refreshGroupName(srcType, srcId);
+    console.log(`[join] เข้ากลุ่ม "${name}" (${srcId})`);
+    return client.replyMessage({ replyToken: event.replyToken, messages: [welcomeFlex()] });
+  }
+
+  // --- บอทออก/โดนเตะจากกลุ่ม ---
+  if (event.type === 'leave' && srcId) {
+    deactivateGroup(srcId);
+    console.log(`[leave] ออกจากกลุ่ม ${srcId}`);
+    return;
+  }
+
+  // --- สมาชิกใหม่เข้ากลุ่ม → จำชื่อไว้เลย ---
+  if (event.type === 'memberJoined' && srcId) {
+    for (const m of event.joined?.members || []) await rememberMember(srcType, srcId, m.userId);
+    return;
+  }
+
+  // --- คนกด unsend → ลบ log ตาม (เคารพเจตนาคนลบ) ---
+  if (event.type === 'unsend' && event.unsend?.messageId) {
+    if (deleteByLineMsgId(event.unsend.messageId)) console.log('[unsend] ลบ log ตาม 1 ข้อความ');
+    return;
+  }
+
+  if (event.type !== 'message') return;
+
+  // --- แชท 1:1 — บอทตัวนี้ทำงานในกลุ่มเป็นหลัก ---
+  if (srcType === 'user') {
+    if (event.message.type !== 'text') return;
+    console.log(`[dm] ${src.userId}: ${event.message.text}`);
+    return client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: 'text',
+          text: 'สวัสดีค่ะ น้องฟ้าใสเป็นบอทผู้ช่วยประจำกลุ่มนะคะ 💙 ลองเชิญน้องเข้ากลุ่ม (invite เหมือนเพื่อนคนนึง) แล้วน้องจะช่วยจด+สรุปแชทให้ค่ะ พิมพ์ !ช่วย ในกลุ่มดูคำสั่งได้เลยนะคะ',
+        },
+      ],
+    });
+  }
+
+  if (!srcId) return;
+  ensureGroup(srcId); // เผื่อบอทอยู่ในกลุ่มมาก่อน deploy (ไม่มี event join)
+  await rememberMember(srcType, srcId, src.userId);
+
+  const msg = event.message;
+
+  // ข้อความไม่ใช่ text → เก็บ placeholder ก่อน แล้วให้ AI อ่านตัวจริงเบื้องหลัง
+  if (msg.type !== 'text') {
+    const rowId = logMessage(srcId, src.userId, msg.id, msg.type, placeholder(msg));
+    if (['image', 'audio', 'video', 'file'].includes(msg.type)) {
+      processMedia(srcId, rowId, msg).catch((e) => console.error('[media]', e.message));
+    }
+    return;
+  }
+
+  const text = msg.text;
+  const rowId = logMessage(srcId, src.userId, msg.id, 'text', text);
+
+  // ดักจับยอดเงิน (ข้ามบรรทัดคำสั่ง)
+  if (!text.startsWith('!')) {
+    for (const v of extractMoney(text)) logExtract(srcId, rowId, 'money', v);
+  }
+
+  // คำสั่ง / mention → ตอบในกลุ่ม (reply ฟรี)
+  const q = mentionQuestion(msg, botUserId);
+  if (text.startsWith('!') || q !== null) {
+    const groupName = await refreshGroupName(srcType, srcId);
+    try {
+      const answer = await handleCommand(srcId, groupName, text, q);
+      if (answer) {
+        await client.replyMessage({ replyToken: event.replyToken, messages: toMessages(answer) });
+      }
+    } catch (e) {
+      console.error('[command]', e.message);
+      await client
+        .replyMessage({
+          replyToken: event.replyToken,
+          messages: [{ type: 'text', text: 'ขอโทษนะคะ ระบบน้องสะดุดนิดหน่อย ลองใหม่อีกทีได้เลยค่ะ 🙏' }],
+        })
+        .catch(() => {});
+    }
+  }
+}
+
+// ---------- admin ----------
+function checkKey(req, res) {
+  if (!process.env.ADMIN_KEY || req.query.key !== process.env.ADMIN_KEY) {
+    res.status(403).send('forbidden');
+    return false;
+  }
+  return true;
+}
+
+app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// แดชบอร์ดรายวัน — ภาพรวมทุกกลุ่ม (โค้ดหน้าอยู่ที่ src/dashboard.js)
+app.get('/admin', (req, res) => {
+  if (!checkKey(req, res)) return;
+  res.send(renderDashboard(req.query.key));
+});
+
+// พรีวิว/ยิงสรุปเอง: /admin/summary?key=&group=<id>[&date=YYYY-MM-DD][&send=1]
+app.get('/admin/summary', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const g = db.prepare(`SELECT * FROM groups WHERE id = ?`).get(req.query.group || '');
+  if (!g) return res.status(404).send('ไม่เจอกลุ่มนี้');
+  const dateStr = req.query.date || dayjs().format('YYYY-MM-DD');
+  const label = dateStr === dayjs().format('YYYY-MM-DD') ? 'วันนี้' : `วันที่ ${dateStr}`;
+  try {
+    if (req.query.send === '1') {
+      const sent = await pushDailySummary(client, g, dateStr, label);
+      return res.send(sent ? 'ส่งสรุปเข้ากลุ่มแล้ว ✅' : 'แชทเงียบ ไม่มีอะไรให้สรุป — ไม่ได้ส่ง');
+    }
+    const text = await summarizeDay(g.id, g.name || 'กลุ่ม', dateStr, label);
+    res.type('text/plain').send(text);
+  } catch (e) {
+    res.status(500).send(`สรุปไม่สำเร็จ: ${e.message}`);
+  }
+});
+
+// ดาวน์โหลด DB ไว้ backup (แพทเทิร์นเดียวกับ nailaoma)
+app.get('/admin/backup', (req, res) => {
+  if (!checkKey(req, res)) return;
+  const file = process.env.DB_PATH || path.join(__dirname, '..', 'groupbot.db');
+  db.pragma('wal_checkpoint(TRUNCATE)');
+  res.download(file, `groupbot-${dayjs().format('YYYY-MM-DD')}.db`);
+});
+
+// ---------- start ----------
+const port = process.env.PORT || 3000;
+app.listen(port, async () => {
+  console.log(`line-group-bot ฟังอยู่ที่พอร์ต ${port}`);
+  try {
+    const info = await getBotInfo();
+    botUserId = info.userId;
+    console.log(`[bot] ${info.displayName} (${botUserId})`);
+  } catch (e) {
+    console.error('[bot] ดึงข้อมูลบอทไม่ได้ (mention detection ใช้ isSelf อย่างเดียว):', e.message);
+  }
+  startScheduler(client);
+});
