@@ -242,6 +242,7 @@ function renderDashboard(key) {
 
   <h1>🐣 น้องฟ้าใส · แดชบอร์ด</h1>
   <p class="sub">${thaiDateFull(d.today)}<span class="dot">•</span>อัพเดตล่าสุด ${dayjs().format('HH:mm')} น.</p>
+  <p style="margin:-8px 0 22px"><a class="btn" href="/admin/report?key=${k}">📝 อ่านสรุปแชทวันนี้ทุกกลุ่ม (สำหรับดูเอง ไม่เข้ากลุ่ม)</a></p>
 
   <section>
     <div class="kpis">
@@ -284,4 +285,68 @@ function renderDashboard(key) {
 </div></body></html>`;
 }
 
-module.exports = { renderDashboard };
+// ---------- หน้ารายงานสรุปวันนี้ทุกกลุ่ม (ดูเอง ไม่ push เข้ากลุ่ม) ----------
+// items = [{ name, active, count, prose }] — prose คือสรุปร้อยแก้วจาก summarizeDay
+const REPORT_HEADERS = ['📌', '✅', '💰', '⏳', '📊', '🗓️'];
+function proseHtml(prose) {
+  return String(prose)
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((raw) => {
+      const line = esc(raw.trim());
+      const isHead = REPORT_HEADERS.some((e) => raw.trim().startsWith(e));
+      return isHead
+        ? `<div class="rp-head">${line}</div>`
+        : `<div class="rp-line">${line}</div>`;
+    })
+    .join('');
+}
+
+function renderReport(items, key, dateStr, note) {
+  const k = encodeURIComponent(key);
+  const cards = items.length
+    ? items
+        .map(
+          (it) => `<section class="rp-card">
+        <div class="rp-title">${esc(it.name)}${it.active ? '' : ' <span class="rp-off">ออกแล้ว</span>'}
+          <span class="rp-count">${it.count} ข้อความวันนี้</span></div>
+        <div class="rp-body">${proseHtml(it.prose)}</div>
+      </section>`,
+        )
+        .join('')
+    : `<p class="muted">${note ? esc(note) : 'วันนี้ยังไม่มีกลุ่มไหนคุยกันพอให้สรุปเลยค่ะ'}</p>`;
+  return `<!doctype html><html lang="th"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>น้องฟ้าใส · สรุปแชทวันนี้</title>
+<style>
+  :root{--sky:#3f9fda;--sky-dark:#1f7ac0;--ink:#213648;--muted:#8399a8;--hair:#dbeaf6;
+    --bg:#eef5fb;--bg2:#dceaf6;--card:#fff;--off:#d1607a;--shadow:0 4px 16px rgba(31,122,192,.10)}
+  @media(prefers-color-scheme:dark){:root{--ink:#dce8f2;--muted:#8299ac;--hair:#22333f;--bg:#0d1720;--bg2:#101d28;--card:#16232e;--shadow:0 6px 20px rgba(0,0,0,.4)}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:26px 18px 60px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    background:linear-gradient(165deg,var(--bg),var(--bg2));min-height:100vh;color:var(--ink)}
+  .wrap{max-width:720px;margin:0 auto}
+  h1{font-size:1.4rem;margin:0 0 3px}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 8px}
+  .note{background:#fffbe8;border:1px solid #f0e0a8;color:#7a6410;border-radius:10px;padding:9px 13px;font-size:.82rem;margin:0 0 22px}
+  @media(prefers-color-scheme:dark){.note{background:#2a2410;border-color:#5c5320;color:#d8c98a}}
+  .rp-card{background:var(--card);border:1px solid var(--hair);border-radius:16px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:18px}
+  .rp-title{font-weight:800;font-size:1.05rem;color:var(--sky-dark);display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--hair)}
+  .rp-count{font-size:.72rem;font-weight:600;color:var(--muted);margin-left:auto}
+  .rp-off{font-size:.68rem;background:rgba(209,96,122,.14);color:var(--off);padding:2px 8px;border-radius:999px;font-weight:700}
+  .rp-head{font-weight:700;color:var(--sky-dark);margin:14px 0 4px;font-size:.92rem}
+  .rp-head:first-child{margin-top:0}
+  .rp-line{color:var(--ink);font-size:.9rem;line-height:1.55;padding-left:2px}
+  .muted{color:var(--muted)}
+  .foot{color:var(--muted);font-size:.78rem;text-align:center;margin-top:26px}
+  .foot a{color:var(--sky-dark)}
+</style></head><body><div class="wrap">
+  <h1>📝 สรุปแชทวันนี้</h1>
+  <p class="sub">${thaiDateFull(dateStr)}<span style="opacity:.5;margin:0 6px">•</span>อ่านตอน ${dayjs().format('HH:mm')} น.</p>
+  <p class="note">🔒 หน้านี้สำหรับดูเอง — ไม่มีอะไรถูกส่งเข้ากลุ่ม (สรุปคัดประเด็นสำคัญด้วย AI)</p>
+  ${cards}
+  <p class="foot"><a href="/admin?key=${k}">← กลับแดชบอร์ด</a></p>
+</div></body></html>`;
+}
+
+module.exports = { renderDashboard, renderReport };

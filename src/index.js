@@ -21,7 +21,7 @@ const { startScheduler, pushDailySummary } = require('./summary');
 const { extractMoney } = require('./extract');
 const { processMedia } = require('./media');
 const { welcomeFlex } = require('./flex');
-const { renderDashboard } = require('./dashboard');
+const { renderDashboard, renderReport } = require('./dashboard');
 
 // handleCommand คืนได้ทั้ง string / message object (การ์ด) / array → ทำให้เป็น messages เสมอ
 function toMessages(answer) {
@@ -31,10 +31,9 @@ function toMessages(answer) {
 }
 
 // เตือนคีย์ที่ยังไม่ได้ตั้ง แต่ไม่ปิดเซิร์ฟเวอร์ — จะได้เปิดแดชบอร์ด (โหมด demo) ได้แม้ยังไม่ผูกไลน์
-// ฟีเจอร์ที่ต้องใช้แต่ละคีย์: LINE_* = รับ/ตอบข้อความในกลุ่ม, OPENROUTER_API_KEY = สรุป/ตอบด้วย AI
-const missing = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'OPENROUTER_API_KEY'].filter((k) => !process.env[k]);
+const missing = ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "OPENROUTER_API_KEY"].filter((k) => !process.env[k]);
 if (missing.length) {
-  console.warn(`⚠️  ยังไม่ได้ตั้งค่า: ${missing.join(', ')} — บอทไลน์จะยังไม่ทำงานจนกว่าจะตั้งครบ (แดชบอร์ด /admin ยังเปิดดูได้) ดูวิธีใน README.md`);
+  console.warn(`⚠️  ยังไม่ได้ตั้งค่า: ${missing.join(", ")} — บอทไลน์จะยังไม่ทำงานจนกว่าจะตั้งครบ (แดชบอร์ด /admin ยังเปิดดูได้) ดูวิธีใน README.md`);
 }
 
 const middlewareConfig = { channelSecret: process.env.LINE_CHANNEL_SECRET };
@@ -227,6 +226,39 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.get('/admin', (req, res) => {
   if (!checkKey(req, res)) return;
   res.send(renderDashboard(req.query.key));
+});
+
+// รายงานสรุปแชทวันนี้ทุกกลุ่ม (สำหรับดูเอง ไม่ push เข้ากลุ่ม) — cache กัน AI ทำงานซ้ำตอนรีเฟรช
+const reportCache = new Map(); // key `${groupId}:${dateStr}` → prose
+app.get('/admin/report', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const dateStr = dayjs().format('YYYY-MM-DD');
+  if (!process.env.OPENROUTER_API_KEY) {
+    return res.send(renderReport([], req.query.key, dateStr, 'ยังไม่ได้ตั้ง OPENROUTER_API_KEY — ตั้งค่าก่อนถึงจะสรุปได้'));
+  }
+  const groups = db.prepare(`SELECT * FROM groups WHERE active = 1 ORDER BY id`).all();
+  const items = [];
+  for (const g of groups) {
+    const cacheKey = `${g.id}:${dateStr}`;
+    let prose = reportCache.get(cacheKey);
+    if (prose === undefined) {
+      try {
+        prose = await summarizeDay(g.id, g.name || 'กลุ่ม', dateStr, 'วันนี้');
+        reportCache.set(cacheKey, prose); // แคชเฉพาะที่สำเร็จ
+      } catch (e) {
+        console.error(`[report] ${g.id}:`, e.message);
+        continue; // กลุ่มนี้สรุปไม่ได้ ข้ามไป ไม่ให้ทั้งหน้าล่ม
+      }
+    }
+    if (prose.includes('😴')) continue; // ข้ามกลุ่มที่เงียบ ไม่มีอะไรให้สรุป
+    const count = db
+      .prepare(`SELECT count(*) c FROM messages WHERE group_id=? AND date(ts,'+7 hours')=?`)
+      .get(g.id, dateStr).c;
+    items.push({ name: g.name || '(ยังไม่รู้ชื่อกลุ่ม)', active: g.active, count, prose });
+  }
+  // เก็บ cache เฉพาะของวันนี้ (ลบวันเก่าออก กันบวม)
+  for (const key of reportCache.keys()) if (!key.endsWith(`:${dateStr}`)) reportCache.delete(key);
+  res.send(renderReport(items, req.query.key, dateStr));
 });
 
 // พรีวิว/ยิงสรุปเอง: /admin/summary?key=&group=<id>[&date=YYYY-MM-DD][&send=1]
