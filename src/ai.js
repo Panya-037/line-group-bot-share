@@ -1,5 +1,6 @@
 // เรียก LLM ผ่าน OpenRouter (นโยบายบ้านนี้: OpenRouter ก่อนเสมอ)
 const OpenAI = require('openai');
+const { BOT, SELF, PARTICLE } = require('./branding');
 const dayjs = require('./time');
 
 // lazy-init — สร้างตอนใช้จริง (import ได้แม้ยังไม่ตั้งคีย์ เช่นตอนรันเทส)
@@ -61,8 +62,8 @@ async function summarizeChat(rows, { groupName, dateLabel }) {
 async function answerQuestion(rows, question, { groupName }) {
   const chat = toLines(rows);
   return ask(
-    `คุณคือ "น้องฟ้าใส" บอทผู้ช่วยประจำกลุ่ม LINE "${groupName}" พูดจาสุภาพเป็นกันเอง เรียกตัวเองว่า "น้อง" ลงท้ายค่ะ/นะคะ (แต่ไม่ต้องเยอะจนรก) ตอบคำถามจากประวัติแชทที่ให้มาเท่านั้น
-ตอบภาษาไทย สั้น ตรงประเด็น ถ้าในแชทไม่มีข้อมูลให้บอกตรงๆ ว่าน้องหาไม่เจอ อย่าเดา
+    `คุณคือ "${BOT}" บอทผู้ช่วยประจำกลุ่ม LINE "${groupName}" พูดจาสุภาพเป็นกันเอง เรียกตัวเองว่า "${SELF}" ลงท้าย${PARTICLE} (แต่ไม่ต้องเยอะจนรก) ตอบคำถามจากประวัติแชทที่ให้มาเท่านั้น
+ตอบภาษาไทย สั้น ตรงประเด็น ถ้าในแชทไม่มีข้อมูลให้บอกตรงๆ ว่า${SELF}หาไม่เจอ อย่าเดา
 ตอบเป็นข้อความธรรมดา ไม่ใช้ markdown`,
     `ประวัติแชทล่าสุด:\n\n${chat}\n\nคำถาม: ${question}`,
   );
@@ -87,4 +88,26 @@ async function extractWorkItems(rows, { groupName }) {
   };
 }
 
-module.exports = { summarizeChat, answerQuestion, extractWorkItems };
+// สรุป "วันนี้คุยอะไรกันบ้าง" เป็นหัวข้อ ๆ (ไว้ทำหน้าภาพรวมกลุ่ม) — คุยเล่นก็เอา แต่สรุปสั้น
+async function digestDay(rows, { groupName, dateLabel }) {
+  const chat = toLines(rows);
+  const raw = await ask(
+    `คุณเป็นเลขาสรุปแชทกลุ่ม LINE ภาษาไทย สรุปจากแชทที่ให้มาเท่านั้น ห้ามแต่งเรื่องเพิ่ม
+ตอบเป็น JSON ล้วนๆ ห้ามมีข้อความอื่นนอก JSON รูปแบบ:
+{"headline":"วันนี้กลุ่มนี้คุยเรื่องอะไรเป็นหลัก สรุปประโยคเดียวไม่เกิน 70 ตัวอักษร","topics":[{"title":"หัวข้อที่คุยกัน สั้นๆ ไม่เกิน 40 ตัวอักษร","detail":"ใครพูดอะไร ได้ข้อสรุปว่าอย่างไร 1-2 ประโยค"}],"followups":["เรื่องที่ยังไม่จบ ต้องตามต่อ"]}
+กติกา: topics ไม่เกิน 5 หัวข้อ เรียงตามความสำคัญ · คุยเล่น/ทักทายล้วน ให้สรุปสั้นๆ ว่าเป็นการคุยเล่นเรื่องอะไร ไม่ต้องแตกหัวข้อเยอะ · ไม่มีเรื่องต้องตามต่อให้ followups เป็น [] · เขียนแบบรายงานให้หัวหน้าอ่าน ไม่ต้องมีคำลงท้าย ค่ะ/ครับ`,
+    `แชทกลุ่ม "${groupName}" ${dateLabel}:\n\n${chat}`,
+  );
+  const m = raw.match(/\{[\s\S]*\}/); // กันโมเดลแถม ```json ครอบมา
+  const data = JSON.parse(m ? m[0] : raw);
+  return {
+    headline: typeof data.headline === 'string' ? data.headline.trim() : '',
+    topics: (Array.isArray(data.topics) ? data.topics : [])
+      .slice(0, 5)
+      .map((t) => ({ title: String(t?.title || '').trim(), detail: String(t?.detail || '').trim() }))
+      .filter((t) => t.title || t.detail),
+    followups: (Array.isArray(data.followups) ? data.followups : []).map((x) => String(x).trim()).filter(Boolean),
+  };
+}
+
+module.exports = { summarizeChat, answerQuestion, extractWorkItems, digestDay };

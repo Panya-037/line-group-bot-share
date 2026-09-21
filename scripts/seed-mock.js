@@ -4,10 +4,11 @@
 // ข้อมูลทั้งหมดเป็นชื่อ/ยอด/ข้อความสมมติ ไม่เกี่ยวกับกลุ่มจริงใครทั้งสิ้น
 require('dotenv').config();
 const dayjs = require('../src/time');
-const { db, ensureGroup, setGroupName, upsertMember, logMessage, logExtract, setSummaryHour } = require('../src/db');
+const { db, ensureGroup, setGroupName, upsertMember, logMessage, logExtract, setSummaryHour, saveWorkItems, messagesOfDay } = require('../src/db');
 
 // ล้างข้อมูลเดิมก่อน seed (กันซ้ำเวลารันหลายรอบ)
-for (const tbl of ['extracts', 'messages', 'members', 'groups', 'pushes']) db.prepare(`DELETE FROM ${tbl}`).run();
+for (const tbl of ['extracts', 'messages', 'members', 'groups', 'pushes', 'work_items', 'digests'])
+  db.prepare(`DELETE FROM ${tbl}`).run();
 
 // แทรกข้อความพร้อมเวลาย้อนหลังตามต้องการ (dayOffset วันก่อน, hh = ชั่วโมงไทย)
 function seedMsg(gid, uid, type, text, dayOffset, hh) {
@@ -61,6 +62,28 @@ for (let i = 0; i < 3; i++) seedMsg('Gmock-cust', 'Umock-d', 'text', `สอบ�
 for (let d = 2; d <= 13; d++) {
   const n = 2 + ((d * 7) % 9); // จำนวนสุ่มแบบ deterministic
   for (let i = 0; i < n; i++) seedMsg('Gmock-team', 'Umock-b', 'text', `ข้อความย้อนหลังวัน -${d} #${i + 1}`, d, 9 + (i % 8));
+}
+
+// งานที่ต้องทำของวันนี้ — ปกติ AI คัดให้เอง แต่โหมดลองเล่นยังไม่มีคีย์ เลยใส่ผลที่ "เคยคัดไว้" ลง cache ให้เลย
+// (โครงสร้างเดียวกับของจริงเป๊ะ — พอใส่คีย์ AI แล้วมีข้อความใหม่ บอทจะคัดทับให้เอง)
+const todayStr = dayjs().format('YYYY-MM-DD');
+for (const [gid, work] of [
+  ['Gmock-team', {
+    tasks: [
+      { task: 'ส่งดราฟต์สไลด์ก่อนเที่ยง', owner: 'พลอย', due: 'วันนี้ 12:00' },
+      { task: 'สั่งกล่องเพิ่ม 200 ใบ', owner: 'แนน', due: 'ภายใน 5 วัน' },
+    ],
+    money: [{ item: 'มัดจำโรงพิมพ์', amount: '1,700 บาท' }],
+    pending: ['เลือกโทนสีแพ็กเกจให้จบ (ตอนนี้เอียงไปโทนฟ้า)'],
+  }],
+  ['Gmock-cust', {
+    tasks: [{ task: 'จัดส่งของให้คุณเอ', owner: 'แอดมิน', due: 'พรุ่งนี้' }],
+    money: [{ item: 'ค่าสินค้าเซ็ตโปรโมชั่น', amount: '1,250 บาท' }],
+    pending: [],
+  }],
+]) {
+  const rows = messagesOfDay(gid, todayStr);
+  if (rows.length) saveWorkItems(gid, todayStr, rows[rows.length - 1].id, work);
 }
 
 const total = db.prepare(`SELECT count(*) c FROM messages`).get().c;

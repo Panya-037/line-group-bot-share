@@ -13,14 +13,18 @@ flowchart LR
       H -- คำสั่ง/mention --> CMD[commands.js]
       MEDIA[media.js] -.อ่านรูป/เสียง/ไฟล์.-> LOG
       CRON[node-cron ราย ชม.] --> SUM[summary.js]
-      SUM --> LOG
+      SUM --> TASK[tasks.js คัดงาน + แคช]
+      TASK --> LOG
       ADMIN[/admin/] --> DASH[dashboard.js]
       DASH --> LOG
+      DASH -. โหลดทีหลัง .-> TASK
+      BRAND[branding.js ชื่อ/สี] -.-> CMD
+      BRAND -.-> DASH
     end
     CMD -- reply ฟรี --> LINE
     SUM -- push การ์ดสรุป --> LINE
     CMD --> AI[OpenRouter]
-    SUM --> AI
+    TASK --> AI
     MEDIA --> AI
     DASH -- HTML --> BROWSER[เบราว์เซอร์แอดมิน]
 ```
@@ -88,28 +92,68 @@ flowchart TD
 - วันคุยเล่นล้วน (AI คืน JSON ว่าง) เรียก AI แต่ไม่ push
 - push สรุปกิน **1 ครั้ง/กลุ่ม/วัน** — โควต้าฟรี LINE 300/เดือน (เตือนที่ 250)
 
-## 4) แดชบอร์ดรายวัน `/admin`
+## 4) แดชบอร์ด `/admin`
 
-`dashboard.js` query ตาราง `messages` / `extracts` / `groups` / `members` แบบสดทุกครั้งที่เปิด แล้ว render HTML (KPI + กราฟ 14 วัน + ตารางกลุ่ม + ยอดเงินวันนี้) ป้องกันด้วย `ADMIN_KEY`
+`dashboard.js` query ตาราง `messages` / `extracts` / `groups` / `members` แบบสดทุกครั้งที่เปิด แล้ว render HTML ป้องกันด้วย `ADMIN_KEY`
+
+หน้าเรียงจากบนลงล่างตามลำดับที่คนเปิดดูอยากรู้:
+
+1. **แถบฟิลเตอร์** — ช่วงเวลา (`?range=today|7|30`) × กลุ่ม (`?group=<id>`) ทุกส่วนบนหน้าขยับตามฟิลเตอร์ทั้งหมด
+2. **สรุปผลเป็นประโยคภาษาคน** — คิดจากตัวเลขตรงๆ ไม่เรียก AI ไม่เสียเงิน
+3. **การ์ด ✅ งานที่ต้องทำ** — งานค้างรวมทุกกลุ่ม พร้อมแท็ก กลุ่ม/ผู้รับผิดชอบ/กำหนด/ค้างมากี่วัน
+4. KPI 4 ใบ + กราฟ + ตารางเฉพาะกลุ่มที่คุยจริง (กลุ่มเงียบพับเก็บ)
+5. ของระบบ (โควต้า push, ยอดสะสม, ลิงก์สำรองข้อมูล) ยุบไว้ล่างสุด
+
+### งานที่ต้องทำมาจากไหน — และทำไมเปิดซ้ำไม่เสียเงินเพิ่ม
+
+`tasks.js` แคชผลที่ AI คัดไว้ลงตาราง `work_items` คู่กับ id ข้อความล่าสุดของวันนั้น
+
+```mermaid
+flowchart TD
+    OPEN[เปิด /admin] --> FETCH[หน้าเว็บโหลด /admin/tasks.json ทีหลัง]
+    FETCH --> DAYS[หากลุ่ม-วัน ที่มีข้อความ >= 3]
+    DAYS --> CACHE{แคชตรงกับข้อความล่าสุดไหม?}
+    CACHE -- ตรง --> USE[ใช้ของเดิม ไม่เรียก AI]
+    CACHE -- ไม่ตรง --> QUOTA{เรียก AI ครบโควต้ารอบนี้?}
+    QUOTA -- ยัง --> CALL[extractWorkItems แล้วบันทึกแคช]
+    QUOTA -- ครบแล้ว --> LATER[ข้ามไว้ก่อน กดปุ่ม 'อ่านใหม่' ค่อยอ่านต่อ]
+```
+
+- หน้าเว็บไม่ค้างรอ AI เพราะโหลดงานแยกทีหลังผ่าน `/admin/tasks.json`
+- เพดานเรียก AI 8 กลุ่ม-วันต่อการเปิดหนึ่งครั้ง (ปุ่ม "อ่านใหม่" = อ่านสด เพดาน 12)
+- **การ์ดสรุป 20:00 ใช้ `tasks.js` ตัวเดียวกัน** เลยแชร์แคชกับแดชบอร์ด — ถ้าแดชบอร์ดคัดไว้แล้ว ตอนส่งสรุปไม่ต้องเรียก AI ซ้ำ
+- เลือก "วันนี้" แล้วยังไม่มีใครคุย → ถอยไปหยิบงานค้าง 7 วันล่าสุดมาโชว์แทนพร้อมหมายเหตุ
+
+## 5) ชื่อบอทกับโทนสี
+
+`branding.js` อ่าน `BOT_NAME` / `BOT_SELF` / `BOT_THEME` / `BOT_EMOJI` / `BOT_POLITE` จาก `.env` ครั้งเดียวตอนบูต แล้วไฟล์อื่นดึงไปใช้ — ไม่มีไฟล์ไหนฮาร์ดโค้ดชื่อบอทหรือรหัสสีไว้เอง
+
+- ข้อความบนการ์ดทุกบรรทัดผ่าน `say()` และข้อความธรรมดาผ่าน `toMessages()` → ตั้ง `BOT_POLITE=ชาย` ครั้งเดียวคำลงท้ายเปลี่ยนทั้งบอท
+- คำแทนตัวเองเดาจากชื่อให้ (`น้อง...` → "น้อง", `พี่...` → "พี่", ชื่ออื่น → ชื่อเต็ม)
+- เพิ่มธีมสีใหม่ = เพิ่มก้อนใน `THEMES` ของ `branding.js` ไฟล์เดียว
 
 ## โครงสร้างโค้ด
 
 ```
 src/
-  index.js      webhook + routes /admin, /admin/summary, /admin/backup + จุด start
-  db.js         SQLite: groups / members / messages / extracts / pushes + helpers
+  branding.js   ชื่อบอท / คำแทนตัว / อิโมจิ / โทนสี — ที่เดียวที่กำหนดตัวตนบอท
+  index.js      webhook + routes /admin, /admin/tasks.json, /admin/summary, /admin/backup
+  db.js         SQLite: groups / members / messages / extracts / pushes / work_items
   commands.js   คำสั่งในกลุ่ม (คืน string หรือการ์ด Flex)
+  tasks.js      คัดงานที่ต้องทำ + แคชผล AI ต่อ (กลุ่ม, วัน)
   ai.js         OpenRouter: สรุป / ตอบคำถาม / คัดงานเป็น JSON
   media.js      อ่านรูป/เสียง/วิดีโอ/ไฟล์ (โหลดจาก LINE → AI → อัพเดต log)
   extract.js    regex ดักจับยอดเงิน
-  flex.js       การ์ด Flex ทุกใบ (โทนฟ้า-ขาว) + ฟอร์แมตวันที่ พ.ศ.
+  flex.js       การ์ด Flex ทุกใบ + ฟอร์แมตวันที่ พ.ศ.
   summary.js    cron สรุปรายวัน + push + สำเนา Telegram (ทางเลือก)
-  dashboard.js  หน้าแดชบอร์ด /admin
+  dashboard.js  หน้าแดชบอร์ด /admin + หน้าอ่านสรุป /admin/report
   time.js       dayjs โซนไทย
+bin/
+  backup-db.sh  ดึงไฟล์ฐานข้อมูลจากคลาวด์มาเก็บในเครื่อง (เก็บ 14 วัน)
 scripts/
   seed-mock.js  ใส่ข้อมูลจำลองไว้ลองแดชบอร์ด
 test/
-  run.js        เทส offline (db / regex / คำสั่ง / การ์ด / แดชบอร์ด)
+  run.js        เทส offline 66 เคส (ชื่อ-ธีม / db / regex / คำสั่ง / การ์ด / แคชงาน / ฟิลเตอร์)
 ```
 
 ## โมเดลต้นทุน

@@ -1,5 +1,6 @@
 // ชุดทดสอบแบบ offline — ไม่ต้องมี LINE token หรือ OpenRouter key (รันใน CI ได้เลย)
-// ครอบคลุม: db, ดักจับยอดเงิน, mention, คำสั่งที่ไม่เรียก AI, โครงการ์ด Flex, แดชบอร์ด
+// ครอบคลุม: ชื่อ/ธีมบอทจาก .env, db, ดักจับยอดเงิน, mention, คำสั่งที่ไม่เรียก AI,
+//          โครงการ์ด Flex, งานที่ต้องทำ (cache ไม่เรียก AI ซ้ำ), แดชบอร์ด + ฟิลเตอร์
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -7,6 +8,9 @@ const fs = require('fs');
 // ใช้ DB ชั่วคราวแยกต่อการรัน 1 ครั้ง
 process.env.DB_PATH = path.join(os.tmpdir(), `groupbot-test-${process.pid}.db`);
 process.env.ADMIN_KEY = 'test-key';
+// ตั้งชื่อ+ธีมเองเหมือนลูกค้าทำใน .env (ต้องตั้งก่อน require เพราะ branding อ่านตอนโหลด)
+process.env.BOT_NAME = 'น้องมะลิ';
+process.env.BOT_THEME = 'green';
 for (const s of ['', '-shm', '-wal']) { try { fs.unlinkSync(process.env.DB_PATH + s); } catch {} }
 
 const dayjs = require('../src/time');
@@ -14,7 +18,9 @@ const db = require('../src/db');
 const { extractMoney } = require('../src/extract');
 const { handleCommand } = require('../src/commands');
 const flex = require('../src/flex');
-const { renderDashboard } = require('../src/dashboard');
+const { renderDashboard, parseFilters } = require('../src/dashboard');
+const branding = require('../src/branding');
+const { collectWork, workItemsFor } = require('../src/tasks');
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -91,14 +97,65 @@ async function main() {
   }
   check('การ์ดสรุปโชว์วันที่ พ.ศ.', cards.workSummaryFlex.contents.header.contents[1].text.includes('2569'));
 
+  // ===== ชื่อบอท/ธีม ตั้งเองจาก .env =====
+  check('ชื่อบอทมาจาก BOT_NAME', branding.BOT === 'น้องมะลิ');
+  check('เดาคำแทนตัวจากชื่อ: น้องมะลิ → น้อง', branding.SELF === 'น้อง');
+  check('ธีมเปลี่ยนตาม BOT_THEME', branding.THEME.main === branding.THEMES.green.main);
+  check('ไม่ตั้งอะไรเลย = น้องฟ้าใส ธีมฟ้า', (() => { const b = branding.resolve({}); return b.BOT === 'น้องฟ้าใส' && b.THEME_KEY === 'sky'; })());
+  check('ชื่อขึ้นต้น พี่ → เรียกตัวเองว่า พี่', branding.guessSelf('พี่หมี') === 'พี่');
+  check('ชื่อฝรั่ง → เรียกชื่อตัวเองเต็ม', branding.guessSelf('MayBot') === 'MayBot');
+  check('BOT_SELF สั่งทับได้', branding.resolve({ BOT_NAME: 'น้องมะลิ', BOT_SELF: 'มะลิ' }).SELF === 'มะลิ');
+  check('ธีมมั่ว → ถอยไปใช้ฟ้า', branding.resolve({ BOT_THEME: 'ไม่มีสีนี้' }).THEME_KEY === 'sky');
+  check('BOT_POLITE=ชาย → ลงท้ายครับ', branding.toMale('สวัสดีค่ะ ฝากตัวด้วยนะคะ') === 'สวัสดีครับ ฝากตัวด้วยนะครับ');
+  check('BOT_POLITE=ชาย ไม่ทำคำว่าคะแนนพัง', branding.toMale('ได้ 5 คะแนนค่ะ') === 'ได้ 5 คะแนนครับ');
+  check('ค่าเริ่มต้น (หญิง) ไม่แตะข้อความ', branding.resolve({}).say('สวัสดีค่ะ') === 'สวัสดีค่ะ');
+  check('การ์ดใช้ชื่อที่ตั้งเอง', cards.helpFlex.contents.header.contents[0].text.includes('น้องมะลิ'));
+  check('การ์ดต้อนรับใช้ชื่อที่ตั้งเอง', cards.welcomeFlex.altText.includes('น้องมะลิ'));
+  check('การ์ดใช้สีตามธีมที่ตั้ง', cards.helpFlex.contents.header.backgroundColor === branding.THEMES.green.main);
+
+  // ===== งานที่ต้องทำ — ต้องไม่เรียก AI ซ้ำถ้าไม่มีข้อความใหม่ =====
+  const today = dayjs().format('YYYY-MM-DD');
+  db.ensureGroup('G2');
+  db.setGroupName('G2', 'กลุ่มงาน');
+  for (const [i, txt] of ['ทำสไลด์ให้หน่อย', 'ได้เลย พรุ่งนี้เช้า', 'โอนมัดจำ 2,000 บาทแล้ว'].entries()) {
+    db.logMessage('G2', 'U1', `wk${i}`, 'text', txt);
+  }
+  const rowsToday = db.messagesOfDay('G2', today);
+  db.saveWorkItems('G2', today, rowsToday[rowsToday.length - 1].id, { tasks: [{ task: 'ทำสไลด์', owner: 'พลอย', due: 'พรุ่งนี้' }], money: [], pending: [] });
+  const cachedWork = await workItemsFor('G2', today, { groupName: 'กลุ่มงาน' });
+  check('งานที่ cache ไว้ = ไม่เรียก AI', cachedWork.usedAI === false && cachedWork.data.tasks.length === 1);
+  const collected = await collectWork({ from: today, to: today, groupId: 'G2' });
+  check('รวมงานทั้งช่วงได้จาก cache', collected.usedAI === 0 && collected.items[0].tasks[0].task === 'ทำสไลด์');
+  db.ensureGroup('G3');
+  db.logMessage('G3', 'U1', 'q1', 'text', 'ไปกินข้าวกัน');
+  check('แชทเงียบ (<3 ข้อความ) = ไม่เรียก AI', (await workItemsFor('G3', today, {})).quiet === true);
+
   // ===== แดชบอร์ด =====
   const html = renderDashboard('test-key');
   check('แดชบอร์ดเป็น HTML เต็ม', html.startsWith('<!doctype html>') && html.includes('</html>'));
-  check('แดชบอร์ดมีชื่อบอท', html.includes('น้องฟ้าใส · แดชบอร์ด'));
+  check('แดชบอร์ดใช้ชื่อบอทที่ตั้งเอง', html.includes('น้องมะลิ · แดชบอร์ด') && !html.includes('น้องฟ้าใส'));
+  check('แดชบอร์ดใช้สีตามธีมที่ตั้ง', html.includes(branding.THEMES.green.main));
   check('แดชบอร์ดมีกราฟ 14 แท่ง', (html.match(/class="bar-col"/g) || []).length === 14);
   check('แดชบอร์ดโชว์กลุ่มทดสอบ', html.includes('กลุ่มทดสอบ'));
   check('แดชบอร์ด escape ปลอดภัย', !/<script>alert/i.test(html));
   check('ลิงก์ backup มี key', html.includes('/admin/backup?key=test-key'));
+  check('การ์ดงานที่ต้องทำอยู่บนหน้า', html.includes('งานที่ต้องทำ'));
+
+  // ===== ฟิลเตอร์ช่วง/กลุ่ม =====
+  check('ช่วงเริ่มต้น = วันนี้', parseFilters({}).range === 'today');
+  check('ช่วง 30 วัน', parseFilters({ range: '30' }).days === 30);
+  check('ช่วงมั่ว → ถอยไปวันนี้', parseFilters({ range: 'มั่ว' }).range === 'today');
+  check('เลือกกลุ่มได้', parseFilters({ group: 'G2' }).groupId === 'G2');
+  const html7 = renderDashboard('test-key', { range: '7' });
+  check('ฟิลเตอร์ 7 วัน เรนเดอร์ได้', html7.includes('7 วัน') && html7.includes('range=7'));
+  const html30 = renderDashboard('test-key', { range: '30' });
+  check('ช่วง 30 วัน = กราฟ 30 แท่ง', (html30.match(/class="bar-col"/g) || []).length === 30);
+  const htmlG = renderDashboard('test-key', { group: 'G2' });
+  check('เจาะกลุ่มเดียว โชว์ชื่อกลุ่มนั้น', htmlG.includes('กลุ่มงาน'));
+  check('ปุ่มช่วงเรียง วันนี้ → 7 → 30', (() => {
+    const order = [...html.matchAll(/class="tab[^"]*"[^>]*>([^<]+)</g)].map((m) => m[1].trim());
+    return order.indexOf('วันนี้') === 0 && order.indexOf('7 วัน') === 1 && order.indexOf('30 วัน') === 2;
+  })());
 
   console.log(`\n${pass} ผ่าน / ${fail} พัง`);
   for (const s of ['', '-shm', '-wal']) { try { fs.unlinkSync(process.env.DB_PATH + s); } catch {} }

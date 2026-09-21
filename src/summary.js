@@ -1,8 +1,8 @@
 // สรุปรายวันอัตโนมัติ — cron ทุกชั่วโมงเช็คว่ากลุ่มไหนถึงเวลาสรุป (push กินโควต้า 300/เดือน)
 const cron = require('node-cron');
 const dayjs = require('./time');
-const { groupsDueForSummary, countPush, pushCount, messagesOfDay } = require('./db');
-const { extractWorkItems } = require('./ai');
+const { groupsDueForSummary, countPush, pushCount } = require('./db');
+const { workItemsFor } = require('./tasks');
 const { workSummaryFlex, workSummaryText } = require('./flex');
 
 // ส่งข้อความเข้า Telegram แจ้งแอดมิน (ฟรี ไม่กินโควต้า LINE) — ไม่ตั้ง env = ข้ามเงียบๆ
@@ -25,12 +25,12 @@ async function sendTelegram(text) {
 // คุยเล่นล้วน/แชทเงียบ → ไม่ส่งเลย (ประหยัดทั้ง AI ทั้งโควต้า push)
 async function pushDailySummary(client, group, dateStr, dateLabel) {
   const name = group.name || 'กลุ่ม';
-  const rows = messagesOfDay(group.id, dateStr).filter((m) => !m.text?.startsWith('!'));
-  if (rows.length < 3) {
-    console.log(`[summary] ${name}: แชทเงียบ (${rows.length} ข้อความ) ข้ามไม่เรียก AI`);
+  // ใช้ตัวคัดงานตัวเดียวกับแดชบอร์ด — ถ้าแดชบอร์ดเพิ่งอ่านไป ตรงนี้ได้ของเดิมฟรีๆ
+  const { data, quiet, count } = await workItemsFor(group.id, dateStr, { groupName: name });
+  if (quiet) {
+    console.log(`[summary] ${name}: แชทเงียบ (${count} ข้อความ) ข้ามไม่เรียก AI`);
     return false;
   }
-  const data = await extractWorkItems(rows, { groupName: name });
   if (!data.tasks.length && !data.money.length && !data.pending.length) {
     console.log(`[summary] ${name}: วันนี้คุยเล่นล้วน ไม่มีเรื่องงาน — ข้ามไม่ push`);
     return false;
@@ -47,7 +47,7 @@ function startScheduler(client) {
   cron.schedule(
     '5 * * * *',
     async () => {
-      // ต้องอ่านเวลาไทยตรงๆ ด้วย .tz() — cron ยิงตามเวลาไทย แต่ dayjs() เปล่าๆ ใช้เวลาเครื่อง (มัก UTC บน cloud)
+      // ต้องอ่านเวลาไทยตรงๆ ด้วย .tz() — cron ยิงตามเวลาไทย แต่ dayjs() เปล่าๆ ใช้เวลาเครื่อง (UTC บน Railway)
       const hour = dayjs().tz().hour();
       const due = groupsDueForSummary(hour);
       if (!due.length) return;

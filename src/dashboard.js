@@ -1,6 +1,8 @@
-// แดชบอร์ดรายวัน /admin — ภาพรวมทุกกลุ่ม อัพเดตทุกครั้งที่เปิด (โทนฟ้า-ขาวเข้าธีมน้องฟ้าใส)
+// แดชบอร์ด /admin — ดูง่ายบนมือถือ: ฟิลเตอร์ช่วงเวลา/กลุ่ม → สรุปผลเป็นภาษาคน → งานที่ต้องทำ → รายละเอียด
+// (ชื่อบอท/โทนสีมาจาก src/branding.js) อัพเดตสดทุกครั้งที่เปิด — ส่วน "งานที่ต้องทำ" โหลดทีหลังผ่าน /admin/tasks.json
 const dayjs = require('./time');
 const { db, pushCount } = require('./db');
+const { BOT, SELF, EMOJI, THEME: T, say } = require('./branding');
 
 const D = "date(ts,'+7 hours')"; // แปลง UTC → วันไทย
 const esc = (s) =>
@@ -16,6 +18,15 @@ const TYPE_LABEL = {
   location: '📍 ตำแหน่ง',
 };
 const MEDIA_TYPES = ['image', 'audio', 'video', 'file'];
+
+// ช่วงเวลาที่เลือกได้ (ฟิลเตอร์หลัก)
+const RANGES = {
+  today: { days: 1, label: 'วันนี้', chart: 14 },
+  '7': { days: 7, label: '7 วัน', chart: 14 },
+  '30': { days: 30, label: '30 วัน', chart: 30 },
+};
+// คีย์ '7'/'30' เป็นเลข JS เลยเรียงมาก่อน 'today' เอง — ล็อกลำดับปุ่มไว้เอง
+const RANGE_ORDER = ['today', '7', '30'];
 
 function thaiDateFull(dateStr) {
   const d = dayjs(dateStr);
@@ -37,252 +48,571 @@ function ago(ts) {
   return m.format('D MMM');
 }
 
-function delta(today, yesterday) {
-  const diff = today - yesterday;
-  if (yesterday === 0 && today === 0) return '';
-  if (diff > 0) return `<span class="up">▲ ${diff}</span> จากเมื่อวาน`;
-  if (diff < 0) return `<span class="down">▼ ${-diff}</span> จากเมื่อวาน`;
-  return `<span class="flat">เท่าเมื่อวาน</span>`;
+function num(n) {
+  return Number(n || 0).toLocaleString('en-US');
+}
+function baht(n) {
+  return Number(n || 0).toLocaleString('th-TH', { maximumFractionDigits: 0 });
+}
+function moneyValue(v) {
+  const n = parseFloat(String(v).replace(/,/g, '').replace(/[^\d.]/g, ''));
+  return Number.isFinite(n) ? n : 0;
 }
 
-function gather() {
-  const today = dayjs().format('YYYY-MM-DD');
-  const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD');
-  const month = dayjs().format('YYYY-MM');
+function delta(now, before, unitLabel) {
+  const diff = now - before;
+  if (before === 0 && now === 0) return '';
+  if (diff > 0) return `<span class="up">▲ ${num(diff)}</span> ${unitLabel}`;
+  if (diff < 0) return `<span class="down">▼ ${num(-diff)}</span> ${unitLabel}`;
+  return `<span class="flat">เท่าเดิม</span> ${unitLabel}`;
+}
 
-  const msgToday = db.prepare(`SELECT count(*) c FROM messages WHERE ${D}=?`).get(today).c;
-  const msgYest = db.prepare(`SELECT count(*) c FROM messages WHERE ${D}=?`).get(yesterday).c;
-  const activeToday = db.prepare(`SELECT count(DISTINCT group_id) c FROM messages WHERE ${D}=?`).get(today).c;
+// ---------- ฟิลเตอร์ ----------
+function parseFilters(q = {}) {
+  const range = RANGES[q.range] ? String(q.range) : 'today';
+  const { days, label } = RANGES[range];
+  const to = dayjs().format('YYYY-MM-DD');
+  const from = dayjs().subtract(days - 1, 'day').format('YYYY-MM-DD');
+  const prevTo = dayjs(from).subtract(1, 'day').format('YYYY-MM-DD');
+  const prevFrom = dayjs(prevTo).subtract(days - 1, 'day').format('YYYY-MM-DD');
+  const gid = q.group && q.group !== 'all' ? String(q.group) : null;
+  const group = gid ? db.prepare(`SELECT * FROM groups WHERE id = ?`).get(gid) : null;
+  return {
+    range,
+    days,
+    label,
+    from,
+    to,
+    prevFrom,
+    prevTo,
+    compareLabel: days === 1 ? 'เทียบเมื่อวาน' : `เทียบ ${days} วันก่อนหน้า`,
+    groupId: group ? group.id : null,
+    groupName: group ? group.name || '(ยังไม่รู้ชื่อกลุ่ม)' : null,
+  };
+}
 
-  const byType = db.prepare(`SELECT type, count(*) c FROM messages WHERE ${D}=? GROUP BY type`).all(today);
+// ---------- ดึงข้อมูลตามฟิลเตอร์ ----------
+function gather(f) {
+  const gWhere = f.groupId ? ' AND group_id = ?' : '';
+  const gArg = f.groupId ? [f.groupId] : [];
+  const win = [f.from, f.to, ...gArg];
+  const prevWin = [f.prevFrom, f.prevTo, ...gArg];
+
+  const msgNow = db.prepare(`SELECT count(*) c FROM messages WHERE ${D} BETWEEN ? AND ?${gWhere}`).get(...win).c;
+  const msgPrev = db.prepare(`SELECT count(*) c FROM messages WHERE ${D} BETWEEN ? AND ?${gWhere}`).get(...prevWin).c;
+  const activeGroups = db
+    .prepare(`SELECT count(DISTINCT group_id) c FROM messages WHERE ${D} BETWEEN ? AND ?${gWhere}`)
+    .get(...win).c;
+
+  const byType = db
+    .prepare(`SELECT type, count(*) c FROM messages WHERE ${D} BETWEEN ? AND ?${gWhere} GROUP BY type`)
+    .all(...win);
   const typeMap = Object.fromEntries(byType.map((r) => [r.type, r.c]));
-  const mediaToday = MEDIA_TYPES.reduce((s, tp) => s + (typeMap[tp] || 0), 0);
+  const media = MEDIA_TYPES.reduce((s, tp) => s + (typeMap[tp] || 0), 0);
 
-  const moneyToday = db
+  const money = db
     .prepare(
-      `SELECT e.ts, e.value, COALESCE(g.name,'กลุ่ม') gname
-       FROM extracts e LEFT JOIN groups g ON g.id=e.group_id
-       WHERE e.kind='money' AND ${D.replace('ts', 'e.ts')}=? ORDER BY e.id DESC`,
+      `SELECT e.ts, e.value, COALESCE(g.name,'(ยังไม่รู้ชื่อกลุ่ม)') gname
+       FROM extracts e LEFT JOIN groups g ON g.id = e.group_id
+       WHERE e.kind='money' AND date(e.ts,'+7 hours') BETWEEN ? AND ?${f.groupId ? ' AND e.group_id = ?' : ''}
+       ORDER BY e.id DESC`,
     )
-    .all(today);
+    .all(...win);
+  const moneySum = money.reduce((s, m) => s + moneyValue(m.value), 0);
 
-  // 14 วันย้อนหลัง เติมวันที่ไม่มีข้อความเป็น 0
+  // กราฟย้อนหลัง — เติมวันที่ไม่มีข้อความเป็น 0
+  const chartLen = RANGES[f.range].chart;
+  const chartFrom = dayjs().subtract(chartLen - 1, 'day').format('YYYY-MM-DD');
   const raw = db
-    .prepare(`SELECT ${D} d, count(*) c FROM messages WHERE ${D} >= date('now','+7 hours','-13 days') GROUP BY d`)
-    .all();
+    .prepare(`SELECT ${D} d, count(*) c FROM messages WHERE ${D} >= ?${gWhere} GROUP BY d`)
+    .all(chartFrom, ...gArg);
   const cntByDay = Object.fromEntries(raw.map((r) => [r.d, r.c]));
   const days = [];
-  for (let i = 13; i >= 0; i--) {
+  for (let i = chartLen - 1; i >= 0; i--) {
     const ds = dayjs().subtract(i, 'day').format('YYYY-MM-DD');
-    days.push({ ds, label: dayjs(ds).format('D/M'), count: cntByDay[ds] || 0 });
+    days.push({ ds, label: dayjs(ds).format('D/M'), count: cntByDay[ds] || 0, inRange: ds >= f.from });
   }
 
+  // ทุกกลุ่ม + ยอดในช่วงที่เลือก
   const groups = db
     .prepare(
-      `SELECT g.*,
-        (SELECT count(*) FROM members mb WHERE mb.group_id=g.id) members,
-        (SELECT count(*) FROM messages m WHERE m.group_id=g.id) total,
-        (SELECT count(*) FROM messages m WHERE m.group_id=g.id AND ${D.replace('ts', 'm.ts')}=?) today,
-        (SELECT max(ts) FROM messages m WHERE m.group_id=g.id) last_ts,
-        (SELECT count(*) FROM extracts e WHERE e.group_id=g.id AND e.kind='money' AND ${D.replace('ts', 'e.ts')}=?) money_today
-       FROM groups g ORDER BY g.active DESC, today DESC, total DESC`,
+      `SELECT g.id, COALESCE(g.name,'(ยังไม่รู้ชื่อกลุ่ม)') name, g.active, g.summary_on, g.summary_hour, g.image_reply,
+        (SELECT count(*) FROM members mb WHERE mb.group_id = g.id) members,
+        (SELECT count(*) FROM messages m WHERE m.group_id = g.id) total,
+        (SELECT count(*) FROM messages m WHERE m.group_id = g.id AND date(m.ts,'+7 hours') BETWEEN ? AND ?) win,
+        (SELECT max(ts) FROM messages m WHERE m.group_id = g.id) last_ts,
+        (SELECT count(*) FROM extracts e WHERE e.group_id = g.id AND e.kind='money'
+           AND date(e.ts,'+7 hours') BETWEEN ? AND ?) money_win
+       FROM groups g ORDER BY win DESC, g.active DESC, total DESC`,
     )
-    .all(today, today);
+    .all(f.from, f.to, f.from, f.to);
 
-  const totals = {
-    groups: groups.length,
-    members: db.prepare(`SELECT count(*) c FROM members`).get().c,
-    messages: db.prepare(`SELECT count(*) c FROM messages`).get().c,
+  const scoped = f.groupId ? groups.filter((g) => g.id === f.groupId) : groups;
+  const busy = scoped.filter((g) => g.win > 0);
+  const quiet = f.groupId ? [] : scoped.filter((g) => g.win === 0);
+  const top = busy[0] || null;
+
+  // รายชื่อกลุ่มสำหรับช่องเลือก — กลุ่มที่ยังอยู่ก่อน เรียงตามที่คุยล่าสุด
+  const pickList = db
+    .prepare(
+      `SELECT g.id, COALESCE(g.name,'(ยังไม่รู้ชื่อกลุ่ม)') name, g.active,
+        (SELECT max(ts) FROM messages m WHERE m.group_id = g.id) last_ts
+       FROM groups g ORDER BY g.active DESC, last_ts DESC`,
+    )
+    .all();
+
+  return {
+    msgNow,
+    msgPrev,
+    activeGroups,
+    typeMap,
+    media,
+    money,
+    moneySum,
+    days,
+    groups,
+    busy,
+    quiet,
+    top,
+    pickList,
+    totals: {
+      groups: groups.length,
+      activeGroups: groups.filter((g) => g.active).length,
+      members: db.prepare(`SELECT count(*) c FROM members`).get().c,
+      messages: db.prepare(`SELECT count(*) c FROM messages`).get().c,
+    },
+    push: pushCount(dayjs().format('YYYY-MM')),
   };
-
-  return { today, msgToday, msgYest, activeToday, typeMap, mediaToday, moneyToday, days, groups, totals, push: pushCount(month) };
 }
 
 // ---------- ชิ้นส่วน HTML ----------
-function kpi(label, value, sub = '', accent = false) {
-  return `<div class="kpi${accent ? ' accent' : ''}">
-    <div class="kpi-val">${value}</div>
+function kpi(label, value, sub = '', opts = {}) {
+  const id = opts.id ? ` id="${opts.id}"` : '';
+  return `<div class="kpi${opts.accent ? ' accent' : ''}">
+    <div class="kpi-val"${id}>${value}</div>
     <div class="kpi-label">${label}</div>
-    ${sub ? `<div class="kpi-sub">${sub}</div>` : ''}
+    <div class="kpi-sub"${opts.subId ? ` id="${opts.subId}"` : ''}>${sub}</div>
   </div>`;
+}
+
+function filterBar(f, d, key) {
+  const k = encodeURIComponent(key);
+  const gp = f.groupId ? `&group=${encodeURIComponent(f.groupId)}` : '';
+  const chips = RANGE_ORDER.map(
+    (val) =>
+      `<a class="tab${val === f.range ? ' on' : ''}" href="/admin?key=${k}&range=${val}${gp}">${RANGES[val].label}</a>`,
+  ).join('');
+  const options = [`<option value="all"${f.groupId ? '' : ' selected'}>ทุกกลุ่ม (${d.totals.groups})</option>`]
+    .concat(
+      d.pickList.map(
+        (g) =>
+          `<option value="${esc(g.id)}"${g.id === f.groupId ? ' selected' : ''}>${esc(g.name)}${g.active ? '' : ' · ออกแล้ว'}</option>`,
+      ),
+    )
+    .join('');
+  return `<div class="fbar">
+    <div class="tabs">${chips}</div>
+    <form method="get" action="/admin" class="pick">
+      <input type="hidden" name="key" value="${esc(key)}">
+      <input type="hidden" name="range" value="${f.range}">
+      <select name="group" onchange="this.form.submit()" aria-label="เลือกกลุ่ม">${options}</select>
+    </form>
+  </div>`;
+}
+
+// สรุปผลเป็นประโยคภาษาคน (ไม่ใช้ AI — คิดจากตัวเลขตรงๆ)
+function verdict(f, d) {
+  const where = f.groupId ? `กลุ่ม "${esc(f.groupName)}"` : 'ทุกกลุ่ม';
+  if (!d.msgNow) {
+    return `<p class="verdict">ช่วง <b>${f.label}</b> ${where} ${say('ยังไม่มีใครคุยกันเลยค่ะ')} 🌙</p>`;
+  }
+  const bits = [];
+  bits.push(
+    `ช่วง <b>${f.label}</b> ${where} คุยกัน <b>${num(d.msgNow)}</b> ข้อความ${
+      f.groupId ? '' : ` ใน <b>${d.activeGroups}</b> กลุ่ม`
+    }`,
+  );
+  if (d.top && !f.groupId) bits.push(`คุยเยอะสุดคือ <b>${esc(d.top.name)}</b> (${num(d.top.win)} ข้อความ)`);
+  if (d.media) bits.push(`${esc(SELF)}อ่านรูป/เสียง/ไฟล์ให้ <b>${num(d.media)}</b> ชิ้น`);
+  if (d.money.length)
+    bits.push(`เจอยอดเงิน <b>${d.money.length}</b> รายการ รวมประมาณ <b>${baht(d.moneySum)}</b> บาท`);
+  return `<p class="verdict">${bits.join(' · ')}</p>`;
 }
 
 function barChart(days) {
   const max = Math.max(1, ...days.map((d) => d.count));
+  const sparse = days.length > 20;
   const bars = days
     .map((d, i) => {
       const h = Math.round((d.count / max) * 100);
-      const isToday = i === days.length - 1;
+      const showLbl = !sparse || i % 3 === 0 || i === days.length - 1;
       return `<div class="bar-col" title="${d.label}: ${d.count} ข้อความ">
-        <div class="bar-num">${d.count || ''}</div>
-        <div class="bar${isToday ? ' today' : ''}" style="height:${Math.max(h, d.count ? 6 : 2)}%"></div>
-        <div class="bar-lbl">${d.label}</div>
+        <div class="bar-num">${sparse ? '' : d.count || ''}</div>
+        <div class="bar${d.inRange ? ' on' : ''}" style="height:${Math.max(h, d.count ? 6 : 2)}%"></div>
+        <div class="bar-lbl">${showLbl ? d.label : ''}</div>
       </div>`;
     })
     .join('');
-  return `<div class="chart">${bars}</div>`;
+  return `<div class="chart">${bars}</div>
+    <p class="chart-note">แท่งเข้ม = ช่วงที่เลือกอยู่</p>`;
 }
 
 function typeBreakdown(typeMap) {
   const entries = Object.entries(typeMap).sort((a, b) => b[1] - a[1]);
-  if (!entries.length) return '<p class="muted">วันนี้ยังไม่มีข้อความเข้ามา</p>';
+  if (!entries.length) return '<p class="muted">ช่วงนี้ยังไม่มีข้อความเข้ามา</p>';
   return `<div class="chips">${entries
-    .map(([tp, c]) => `<span class="chip">${TYPE_LABEL[tp] || tp} <b>${c}</b></span>`)
+    .map(([tp, c]) => `<span class="chip">${TYPE_LABEL[tp] || tp} <b>${num(c)}</b></span>`)
     .join('')}</div>`;
 }
 
-function groupRows(groups, key, today) {
-  if (!groups.length) return `<tr><td colspan="6" class="muted">ยังไม่มีกลุ่ม — เชิญน้องฟ้าใสเข้ากลุ่มก่อนนะคะ 🐣</td></tr>`;
-  return groups
+function groupRows(rows, key, f) {
+  const k = encodeURIComponent(key);
+  if (!rows.length)
+    return `<tr><td colspan="4" class="muted">${say('ช่วงนี้ยังไม่มีกลุ่มไหนคุยกันเลยค่ะ — ลองขยายเป็น 7 หรือ 30 วันดูนะคะ')}</td></tr>`;
+  return rows
     .map((g) => {
-      const activePill = g.active
-        ? '<span class="pill on">อยู่ในกลุ่ม</span>'
-        : '<span class="pill off">ออกแล้ว</span>';
-      const sched = g.summary_on ? `ทุกวัน ${g.summary_hour}:00` : '<span class="muted">ปิด</span>';
-      const money = g.money_today ? `<span class="money">${g.money_today}</span>` : '<span class="muted">–</span>';
+      const meta = [
+        g.active ? '' : '<span class="pill off">ออกแล้ว</span>',
+        `👥 ${g.members}`,
+        `สะสม ${num(g.total)}`,
+        g.summary_on ? `สรุป ${g.summary_hour}:00` : 'ปิดสรุป',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      const money = g.money_win ? `<span class="money">${g.money_win}</span>` : '<span class="muted">–</span>';
       return `<tr>
         <td>
-          <div class="g-name">${esc(g.name || '(ยังไม่รู้ชื่อกลุ่ม)')}</div>
-          <div class="g-meta">${activePill} · 👥 ${g.members} · ⏰ ${sched}</div>
+          <a class="g-name" href="/admin?key=${k}&range=${f.range}&group=${encodeURIComponent(g.id)}">${esc(g.name)}</a>
+          <div class="g-meta">${meta}</div>
         </td>
-        <td class="num big">${g.today}</td>
-        <td class="num">${g.total}</td>
+        <td class="num big">${num(g.win)}</td>
         <td class="num">${money}</td>
         <td class="nowrap muted">${ago(g.last_ts)}</td>
-        <td class="nowrap"><a class="btn" href="/admin/summary?key=${encodeURIComponent(key)}&group=${encodeURIComponent(g.id)}">พรีวิวสรุป</a></td>
       </tr>`;
     })
     .join('');
 }
 
-function moneyList(rows) {
-  if (!rows.length) return '<p class="muted">วันนี้ยังไม่เจอยอดเงินในกลุ่มไหนเลย</p>';
-  return `<ul class="money-list">${rows
-    .slice(0, 12)
-    .map(
-      (m) =>
-        `<li><span class="t">${dayjs.utc(m.ts).tz().format('HH:mm')}</span> <span class="g">${esc(m.gname)}</span> <b>${esc(m.value)}</b></li>`,
-    )
-    .join('')}</ul>`;
+function moneyList(rows, f) {
+  if (!rows.length) return `<p class="muted">${say('ช่วงนี้ยังไม่เจอยอดเงินในแชทเลยค่ะ')}</p>`;
+  const item = (m) => {
+    const t = dayjs.utc(m.ts).tz();
+    const when = f.days === 1 ? t.format('HH:mm') : t.format('D/M HH:mm');
+    const who = f.groupId ? '' : `<span class="g">${esc(m.gname)}</span>`;
+    return `<li><span class="t">${when}</span>${who || '<span class="g"></span>'} <b>${esc(m.value)}</b></li>`;
+  };
+  const head = rows.slice(0, 10).map(item).join('');
+  const rest = rows.slice(10);
+  return `<ul class="money-list">${head}</ul>${
+    rest.length
+      ? `<details class="more"><summary>ดูอีก ${rest.length} รายการ</summary><ul class="money-list">${rest
+          .map(item)
+          .join('')}</ul></details>`
+      : ''
+  }
+  <p class="hint">${say(`ยอดเหล่านี้${SELF}จับจากข้อความ/สลิปตรงๆ อาจมีซ้ำหรือเป็นเลขอื่นที่หน้าตาคล้ายยอดเงินได้ค่ะ`)}</p>`;
 }
 
-function renderDashboard(key) {
-  const d = gather();
-  const pushWarn = d.push >= 250;
+// ---------- หน้าแดชบอร์ด ----------
+function renderDashboard(key, query = {}) {
+  const f = parseFilters(query);
+  const d = gather(f);
   const k = encodeURIComponent(key);
+  const gp = f.groupId ? `&group=${encodeURIComponent(f.groupId)}` : '';
+  const tasksUrl = `/admin/tasks.json?key=${k}&range=${f.range}${gp}`;
+  const pushWarn = d.push >= 250;
+
   return `<!doctype html><html lang="th"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>น้องฟ้าใส · แดชบอร์ด</title>
+<title>${esc(BOT)} · แดชบอร์ด</title>
 <style>
   :root{
-    --sky:#3f9fda; --sky-dark:#1f7ac0; --ink:#213648; --muted:#8399a8; --hair:#e2edf6;
-    --bg:#eef5fb; --bg2:#dceaf6; --card:#ffffff; --good:#2fa36b; --warn:#e08a2b; --down:#d1607a;
-    --shadow:0 4px 16px rgba(31,122,192,.10);
+    --sky:${T.main}; --sky-dark:${T.dark}; --ink:${T.ink}; --muted:${T.muted}; --hair:${T.hair};
+    --bg:${T.bg}; --bg2:${T.bg2}; --card:#ffffff; --good:#2fa36b; --warn:#e08a2b; --down:#d1607a;
+    --soft:${T.soft}; --shadow:0 4px 16px rgba(${T.shadowRgb},.10);
   }
   @media (prefers-color-scheme:dark){
     :root{--ink:#dce8f2; --muted:#8299ac; --hair:#22333f; --bg:#0d1720; --bg2:#101d28;
-      --card:#16232e; --shadow:0 6px 20px rgba(0,0,0,.4);}
+      --card:#16232e; --soft:#132029; --shadow:0 6px 20px rgba(0,0,0,.4);}
   }
   *{box-sizing:border-box}
-  body{margin:0;padding:26px 18px 60px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+  body{margin:0;padding:22px 16px 60px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
     background:linear-gradient(165deg,var(--bg),var(--bg2));min-height:100vh;color:var(--ink);
     -webkit-font-smoothing:antialiased}
-  .wrap{max-width:940px;margin:0 auto}
-  h1{font-size:1.45rem;margin:0 0 3px;letter-spacing:-.01em}
-  .sub{color:var(--muted);font-size:.9rem;margin:0 0 22px}
+  .wrap{max-width:900px;margin:0 auto}
+  h1{font-size:1.35rem;margin:0 0 3px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:.86rem;margin:0 0 16px}
   .sub .dot{opacity:.5;margin:0 6px}
-  section{margin-bottom:28px}
-  h2{font-size:.82rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 12px;font-weight:700}
+  section{margin-bottom:22px}
+  h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 10px;font-weight:700}
+  .panel{background:var(--card);border-radius:16px;padding:16px;box-shadow:var(--shadow);border:1px solid var(--hair)}
+  .muted{color:var(--muted)}
+  .hint{color:var(--muted);font-size:.72rem;margin:10px 0 0}
 
-  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:13px}
-  .kpi{background:var(--card);border-radius:14px;padding:15px 16px;box-shadow:var(--shadow);border:1px solid var(--hair)}
+  /* ฟิลเตอร์ — ติดบนสุดเวลาเลื่อน */
+  .fbar{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+    background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:9px 10px;
+    box-shadow:var(--shadow);margin-bottom:16px}
+  .tabs{display:flex;gap:4px;background:var(--soft);border-radius:10px;padding:3px}
+  .tab{padding:7px 13px;border-radius:8px;font-size:.84rem;font-weight:600;color:var(--muted);text-decoration:none}
+  .tab.on{background:var(--sky);color:#fff}
+  .pick{margin-left:auto}
+  .pick select{max-width:52vw;font:inherit;font-size:.84rem;color:var(--ink);background:var(--soft);
+    border:1px solid var(--hair);border-radius:10px;padding:8px 10px}
+
+  .verdict{font-size:.98rem;line-height:1.65;margin:0}
+  .verdict b{color:var(--sky-dark)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:14px}
+  .kpi{background:var(--soft);border-radius:12px;padding:12px 13px;border:1px solid var(--hair)}
   .kpi.accent{background:linear-gradient(150deg,var(--sky),var(--sky-dark));border:none}
   .kpi.accent .kpi-val,.kpi.accent .kpi-label,.kpi.accent .kpi-sub{color:#fff}
   .kpi.accent .kpi-sub .up,.kpi.accent .kpi-sub .down,.kpi.accent .kpi-sub .flat{color:#eaf5ff}
-  .kpi-val{font-size:1.9rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--sky-dark)}
-  .kpi-label{font-size:.82rem;color:var(--muted);margin-top:6px}
-  .kpi-sub{font-size:.72rem;color:var(--muted);margin-top:5px}
+  .kpi-val{font-size:1.65rem;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--sky-dark)}
+  .kpi-label{font-size:.78rem;color:var(--muted);margin-top:6px}
+  .kpi-sub{font-size:.7rem;color:var(--muted);margin-top:4px;min-height:.85rem}
   .up{color:var(--good);font-weight:700} .down{color:var(--down);font-weight:700} .flat{color:var(--muted)}
 
-  .panel{background:var(--card);border-radius:16px;padding:18px 18px 14px;box-shadow:var(--shadow);border:1px solid var(--hair)}
-  .chart{display:flex;gap:2px;align-items:flex-end;height:150px;padding-top:16px}
-  .bar-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px}
-  .bar{width:70%;max-width:26px;background:var(--sky);border-radius:5px 5px 0 0;transition:height .3s}
-  .bar.today{background:var(--sky-dark)}
-  .bar-num{font-size:.6rem;color:var(--muted);font-variant-numeric:tabular-nums;height:12px}
-  .bar-lbl{font-size:.58rem;color:var(--muted);white-space:nowrap}
+  /* งานที่ต้องทำ */
+  .todo{border:1px solid var(--sky);border-radius:16px;background:var(--card);box-shadow:var(--shadow);overflow:hidden}
+  .todo-head{display:flex;align-items:center;gap:10px;padding:13px 16px;background:linear-gradient(150deg,var(--sky),var(--sky-dark));color:#fff}
+  .todo-head .t{font-weight:800;font-size:1rem}
+  .todo-head .c{font-size:.78rem;opacity:.9}
+  .todo-head .reload{margin-left:auto;background:rgba(255,255,255,.2);color:#fff;border:none;border-radius:8px;
+    padding:6px 11px;font:inherit;font-size:.76rem;font-weight:600;cursor:pointer}
+  .todo-head .reload:disabled{opacity:.55}
+  .todo-body{padding:6px 16px 14px}
+  .task{display:flex;gap:10px;padding:11px 0;border-bottom:1px solid var(--hair)}
+  .task:last-child{border-bottom:none}
+  .task .box{flex:none;width:17px;height:17px;border:2px solid var(--sky);border-radius:5px;margin-top:2px}
+  .task .body{flex:1;min-width:0}
+  .task .what{font-weight:600;font-size:.93rem;line-height:1.45}
+  .task .meta{font-size:.73rem;color:var(--muted);margin-top:4px;display:flex;flex-wrap:wrap;gap:4px 8px}
+  .tag{background:var(--soft);border:1px solid var(--hair);border-radius:999px;padding:1px 8px}
+  .tag.due{background:rgba(63,159,218,.12);border-color:transparent;color:var(--sky-dark);font-weight:700}
+  .tag.old{background:rgba(224,138,43,.14);border-color:transparent;color:var(--warn);font-weight:700}
+  .pending li{font-size:.88rem;line-height:1.5;margin-bottom:5px}
+  .pending{margin:4px 0 0;padding-left:20px;color:var(--ink)}
+  .sub-h{font-size:.76rem;font-weight:700;color:var(--muted);margin:14px 0 2px;text-transform:uppercase;letter-spacing:.05em}
+  .skel{height:14px;border-radius:7px;background:var(--soft);margin:12px 0}
+  .skel.s2{width:70%} .skel.s3{width:45%}
 
-  .chips{display:flex;flex-wrap:wrap;gap:9px}
-  .chip{background:var(--card);border:1px solid var(--hair);border-radius:999px;padding:7px 13px;font-size:.82rem;box-shadow:var(--shadow)}
+  .chart{display:flex;gap:2px;align-items:flex-end;height:130px;padding-top:14px}
+  .bar-col{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px}
+  .bar{width:70%;max-width:24px;background:var(--hair);border-radius:5px 5px 0 0}
+  .bar.on{background:var(--sky-dark)}
+  .bar-num{font-size:.58rem;color:var(--muted);font-variant-numeric:tabular-nums;height:11px}
+  .bar-lbl{font-size:.56rem;color:var(--muted);white-space:nowrap;height:10px}
+  .chart-note{color:var(--muted);font-size:.7rem;text-align:right;margin:8px 0 0}
+
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--card);border:1px solid var(--hair);border-radius:999px;padding:6px 12px;font-size:.8rem}
   .chip b{color:var(--sky-dark);margin-left:3px;font-variant-numeric:tabular-nums}
 
   .table-wrap{overflow-x:auto;background:var(--card);border-radius:16px;box-shadow:var(--shadow);border:1px solid var(--hair)}
-  table{border-collapse:collapse;width:100%;min-width:560px}
-  th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--hair);font-size:.87rem;vertical-align:middle}
-  th{font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700}
+  table{border-collapse:collapse;width:100%;min-width:430px}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--hair);font-size:.86rem;vertical-align:middle}
+  th{font-size:.7rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700}
   tr:last-child td{border-bottom:none}
-  .num{text-align:right;font-variant-numeric:tabular-nums} .num.big{font-weight:800;color:var(--sky-dark);font-size:1.05rem}
+  .num{text-align:right;font-variant-numeric:tabular-nums} .num.big{font-weight:800;color:var(--sky-dark)}
   .nowrap{white-space:nowrap}
-  .g-name{font-weight:700} .g-meta{font-size:.72rem;color:var(--muted);margin-top:3px}
+  .g-name{font-weight:700;color:var(--ink);text-decoration:none;border-bottom:1px dashed var(--hair)}
+  .g-meta{font-size:.7rem;color:var(--muted);margin-top:3px}
   .money{color:var(--good);font-weight:700}
-  .pill{font-size:.68rem;padding:2px 8px;border-radius:999px;font-weight:700}
-  .pill.on{background:rgba(47,163,107,.14);color:var(--good)} .pill.off{background:rgba(209,96,122,.14);color:var(--down)}
-  .btn{display:inline-block;background:var(--sky);color:#fff;text-decoration:none;padding:6px 12px;border-radius:8px;font-size:.78rem;font-weight:600}
-  .btn:hover{background:var(--sky-dark)}
+  .pill{font-size:.66rem;padding:2px 7px;border-radius:999px;font-weight:700}
+  .pill.off{background:rgba(209,96,122,.14);color:var(--down)}
+  .btn{display:inline-block;background:var(--sky);color:#fff;text-decoration:none;padding:8px 13px;border-radius:9px;font-size:.8rem;font-weight:600}
+  .btn.ghost{background:transparent;color:var(--sky-dark);border:1px solid var(--hair)}
   .money-list{list-style:none;margin:0;padding:0}
-  .money-list li{display:flex;gap:10px;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--hair);font-size:.87rem}
+  .money-list li{display:flex;gap:10px;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--hair);font-size:.86rem}
   .money-list li:last-child{border:none}
-  .money-list .t{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.8rem}
-  .money-list .g{color:var(--muted);flex:1} .money-list b{color:var(--sky-dark)}
-  .muted{color:var(--muted)}
-  .foot{color:var(--muted);font-size:.76rem;text-align:center;margin-top:30px}
+  .money-list .t{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.78rem;white-space:nowrap}
+  .money-list .g{color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .money-list b{color:var(--sky-dark);white-space:nowrap}
+  details.more,details.sys{margin-top:12px}
+  details>summary{cursor:pointer;color:var(--muted);font-size:.8rem;padding:6px 0}
+  details.sys{background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:6px 14px 2px;box-shadow:var(--shadow)}
+  .sys-body{font-size:.82rem;line-height:1.9;color:var(--muted);padding-bottom:10px}
+  .sys-body a{color:var(--sky-dark)}
+  .sys-body .warn{color:var(--warn);font-weight:700}
+  .quiet-list{font-size:.82rem;color:var(--muted);line-height:1.8;padding-bottom:8px}
+  .quiet-list a{color:var(--muted);text-decoration:none;border-bottom:1px dashed var(--hair)}
+  .foot{color:var(--muted);font-size:.74rem;text-align:center;margin-top:26px}
   .foot a{color:var(--sky-dark)}
-  .quota{margin-top:6px} .quota.warn{color:var(--warn);font-weight:700}
 </style></head><body><div class="wrap">
 
-  <h1>🐣 น้องฟ้าใส · แดชบอร์ด</h1>
-  <p class="sub">${thaiDateFull(d.today)}<span class="dot">•</span>อัพเดตล่าสุด ${dayjs().format('HH:mm')} น.</p>
-  <p style="margin:-8px 0 22px"><a class="btn" href="/admin/report?key=${k}">📝 อ่านสรุปแชทวันนี้ทุกกลุ่ม (สำหรับดูเอง ไม่เข้ากลุ่ม)</a></p>
+  <h1>${EMOJI} ${esc(BOT)} · แดชบอร์ด</h1>
+  <p class="sub">${thaiDateFull(dayjs().format('YYYY-MM-DD'))}<span class="dot">•</span>อัพเดตล่าสุด ${dayjs().format('HH:mm')} น.</p>
+
+  ${filterBar(f, d, key)}
 
   <section>
-    <div class="kpis">
-      ${kpi('ข้อความวันนี้', d.msgToday, delta(d.msgToday, d.msgYest), true)}
-      ${kpi('กลุ่มที่คุยวันนี้', `${d.activeToday}<span style="font-size:1rem;color:var(--muted)">/${d.totals.groups}</span>`, 'จากทั้งหมด')}
-      ${kpi('รูป/เสียง/ไฟล์ที่อ่าน', d.mediaToday, 'วันนี้')}
-      ${kpi('ยอดเงินที่จับได้', d.moneyToday.length, 'รายการวันนี้')}
-      ${kpi('push เดือนนี้', `${d.push}<span style="font-size:1rem;color:var(--muted)">/300</span>`, pushWarn ? '<span class="quota warn">ใกล้เต็มโควต้าฟรี</span>' : 'โควต้าฟรี')}
+    <div class="panel">
+      ${verdict(f, d)}
+      <div class="kpis">
+        ${kpi('ข้อความ', num(d.msgNow), delta(d.msgNow, d.msgPrev, f.compareLabel), { accent: true })}
+        ${kpi(
+          f.groupId ? 'วันที่คุยกัน' : 'กลุ่มที่คุย',
+          f.groupId
+            ? d.days.filter((x) => x.inRange && x.count).length
+            : `${d.activeGroups}<span style="font-size:.95rem;color:var(--muted)">/${d.totals.activeGroups}</span>`,
+          f.groupId ? `จาก ${f.days} วัน` : 'กลุ่มที่บอทยังอยู่',
+        )}
+        ${kpi('งานที่ต้องทำ', '<span class="muted">…</span>', 'คัดจากแชท', { id: 'kpi-tasks' })}
+        ${kpi('ยอดเงินที่จับได้', d.money.length ? baht(d.moneySum) : '0', `${d.money.length} รายการ`)}
+      </div>
     </div>
   </section>
 
   <section>
-    <h2>📊 ข้อความ 14 วันล่าสุด</h2>
-    <div class="panel">${barChart(d.days)}</div>
+    <div class="todo">
+      <div class="todo-head">
+        <span class="t">✅ งานที่ต้องทำ</span>
+        <span class="c" id="todo-count"></span>
+        <button class="reload" id="todo-reload" type="button">อ่านใหม่</button>
+      </div>
+      <div class="todo-body" id="todo-body">
+        <div class="skel"></div><div class="skel s2"></div><div class="skel s3"></div>
+        <p class="muted" style="font-size:.82rem">${esc(SELF)}กำลังอ่านแชทช่วง ${esc(f.label)} ${say('ให้อยู่นะคะ')}…</p>
+      </div>
+    </div>
+    <p style="margin:12px 0 0"><a class="btn ghost" href="/admin/report?key=${k}">📝 อ่านสรุปแบบเต็มของวันนี้ (ไม่ส่งเข้ากลุ่ม)</a></p>
   </section>
 
   <section>
-    <h2>วันนี้มีอะไรเข้ามาบ้าง</h2>
-    ${typeBreakdown(d.typeMap)}
+    <h2>💰 ยอดเงินในช่วงนี้</h2>
+    <div class="panel">${moneyList(d.money, f)}</div>
   </section>
 
   <section>
-    <h2>🗂️ ทุกกลุ่ม</h2>
+    <h2>📊 ความเคลื่อนไหว</h2>
+    <div class="panel">
+      ${barChart(d.days)}
+      <div style="margin-top:14px">${typeBreakdown(d.typeMap)}</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>🗂️ ${f.groupId ? 'กลุ่มที่เลือก' : `กลุ่มที่คุยกันในช่วงนี้ (${d.busy.length})`}</h2>
     <div class="table-wrap"><table>
-      <tr><th>กลุ่ม</th><th class="num">วันนี้</th><th class="num">สะสม</th><th class="num">ยอดเงินวันนี้</th><th>คุยล่าสุด</th><th></th></tr>
-      ${groupRows(d.groups, key, d.today)}
+      <tr><th>กลุ่ม</th><th class="num">ข้อความ</th><th class="num">ยอดเงิน</th><th>คุยล่าสุด</th></tr>
+      ${groupRows(d.busy, key, f)}
     </table></div>
+    ${
+      d.quiet.length
+        ? `<details class="more"><summary>กลุ่มที่เงียบในช่วงนี้ (${d.quiet.length})</summary>
+            <div class="quiet-list">${d.quiet
+              .map(
+                (g) =>
+                  `<a href="/admin?key=${k}&range=${f.range}&group=${encodeURIComponent(g.id)}">${esc(g.name)}</a> <span style="opacity:.6">— ${ago(g.last_ts)}</span>`,
+              )
+              .join('<br>')}</div></details>`
+        : ''
+    }
   </section>
 
-  <section>
-    <h2>💰 ยอดเงินที่จับได้วันนี้</h2>
-    <div class="panel">${moneyList(d.moneyToday)}</div>
-  </section>
+  <details class="sys">
+    <summary>⚙️ ข้อมูลระบบ</summary>
+    <div class="sys-body">
+      โควต้าส่งสรุปเข้ากลุ่มเดือนนี้ ${d.push}/300 ${pushWarn ? '<span class="warn">· ใกล้เต็มแล้ว</span>' : ''}<br>
+      รู้จักสมาชิก ${num(d.totals.members)} คน · เก็บข้อความสะสม ${num(d.totals.messages)} ข้อความ · กลุ่มทั้งหมด ${d.totals.groups} (ยังอยู่ ${d.totals.activeGroups})<br>
+      <a href="/admin/backup?key=${k}">⬇︎ ดาวน์โหลดสำรองข้อมูล (.db)</a>
+    </div>
+  </details>
 
-  <p class="foot">
-    รู้จักสมาชิก ${d.totals.members} คน · เก็บข้อความสะสม ${d.totals.messages} ข้อความ<br>
-    <a href="/admin/backup?key=${k}">⬇︎ ดาวน์โหลดสำรองข้อมูล (.db)</a>
-  </p>
+  <p class="foot">${esc(say(`${BOT}จดให้ทุกวันค่ะ`))} ${EMOJI}</p>
 
-</div></body></html>`;
+</div>
+<script>
+(function(){
+  var URL_BASE = ${JSON.stringify(tasksUrl)};
+  var TODAY = ${JSON.stringify(f.to)};
+  var body = document.getElementById('todo-body');
+  var countEl = document.getElementById('todo-count');
+  var kpiEl = document.getElementById('kpi-tasks');
+  var btn = document.getElementById('todo-reload');
+
+  function el(tag, cls, text){ var e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }
+  function daysAgo(dateStr){
+    var a=new Date(dateStr+'T00:00:00'), b=new Date(TODAY+'T00:00:00');
+    return Math.round((b-a)/86400000);
+  }
+  function dayLabel(dateStr){
+    var n=daysAgo(dateStr);
+    if(n<=0) return 'วันนี้';
+    if(n===1) return 'เมื่อวาน';
+    return n+' วันก่อน';
+  }
+
+  function render(data){
+    body.innerHTML='';
+    var tasks=[], pend=[];
+    (data.items||[]).forEach(function(it){
+      (it.tasks||[]).forEach(function(t){ tasks.push({t:t, g:it.groupName, d:it.date}); });
+      (it.pending||[]).forEach(function(p){ pend.push({p:p, g:it.groupName, d:it.date}); });
+    });
+
+    countEl.textContent = tasks.length ? tasks.length+' อย่าง' : '';
+    kpiEl.innerHTML=''; kpiEl.textContent = String(tasks.length);
+
+    if(!tasks.length && !pend.length){
+      body.appendChild(el('p','muted', data.note || '${say('ช่วงนี้ยังไม่มีงานค้างจากแชทเลยค่ะ')} 🎉'));
+    } else if(data.note){
+      body.appendChild(el('p','hint', data.note));
+    }
+
+    tasks.forEach(function(row){
+      var t=row.t||{};
+      var wrap=el('div','task');
+      wrap.appendChild(el('div','box'));
+      var b=el('div','body');
+      b.appendChild(el('div','what', t.task||'-'));
+      var meta=el('div','meta');
+      meta.appendChild(el('span','tag', row.g));
+      if(t.owner && t.owner!=='-') meta.appendChild(el('span','tag','👤 '+t.owner));
+      if(t.due && t.due!=='-') meta.appendChild(el('span','tag due','⏰ '+t.due));
+      var n=daysAgo(row.d);
+      meta.appendChild(el('span', n>=2?'tag old':'tag', 'คุยกัน'+(n>=2?' ':'')+dayLabel(row.d)));
+      b.appendChild(meta);
+      wrap.appendChild(b);
+      body.appendChild(wrap);
+    });
+
+    if(pend.length){
+      body.appendChild(el('div','sub-h','⏳ ยังไม่มีข้อสรุป / ต้องตามต่อ'));
+      var ul=el('ul','pending');
+      pend.forEach(function(row){
+        var li=el('li', null, row.p);
+        var s=el('span','meta'); s.textContent=' — '+row.g+' · '+dayLabel(row.d);
+        li.appendChild(s);
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+    }
+
+    if(data.skipped){
+      var p=el('p','hint','ยังเหลืออีก '+data.skipped+'${say(` วัน/กลุ่มที่${SELF}ยังอ่านไม่ครบ — กด "อ่านใหม่" อีกทีเพื่ออ่านต่อค่ะ`)}');
+      body.appendChild(p);
+    }
+  }
+
+  function load(force){
+    btn.disabled=true;
+    btn.textContent='กำลังอ่าน…';
+    fetch(URL_BASE+(force?'&force=1':''),{headers:{'Accept':'application/json'}})
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .then(render)
+      .catch(function(){
+        body.innerHTML='';
+        body.appendChild(el('p','muted','${say('โหลดงานไม่สำเร็จค่ะ ลองกด "อ่านใหม่" อีกทีนะคะ')}'));
+      })
+      .finally(function(){ btn.disabled=false; btn.textContent='อ่านใหม่'; });
+  }
+
+  btn.addEventListener('click', function(){ load(true); });
+  load(false);
+})();
+</script>
+</body></html>`;
 }
 
 // ---------- หน้ารายงานสรุปวันนี้ทุกกลุ่ม (ดูเอง ไม่ push เข้ากลุ่ม) ----------
@@ -314,13 +644,13 @@ function renderReport(items, key, dateStr, note) {
       </section>`,
         )
         .join('')
-    : `<p class="muted">${note ? esc(note) : 'วันนี้ยังไม่มีกลุ่มไหนคุยกันพอให้สรุปเลยค่ะ'}</p>`;
+    : `<p class="muted">${note ? esc(note) : say('วันนี้ยังไม่มีกลุ่มไหนคุยกันพอให้สรุปเลยค่ะ')}</p>`;
   return `<!doctype html><html lang="th"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>น้องฟ้าใส · สรุปแชทวันนี้</title>
+<title>${esc(BOT)} · สรุปแชทวันนี้</title>
 <style>
-  :root{--sky:#3f9fda;--sky-dark:#1f7ac0;--ink:#213648;--muted:#8399a8;--hair:#dbeaf6;
-    --bg:#eef5fb;--bg2:#dceaf6;--card:#fff;--off:#d1607a;--shadow:0 4px 16px rgba(31,122,192,.10)}
+  :root{--sky:${T.main};--sky-dark:${T.dark};--ink:${T.ink};--muted:${T.muted};--hair:${T.hair};
+    --bg:${T.bg};--bg2:${T.bg2};--card:#fff;--off:#d1607a;--shadow:0 4px 16px rgba(${T.shadowRgb},.10)}
   @media(prefers-color-scheme:dark){:root{--ink:#dce8f2;--muted:#8299ac;--hair:#22333f;--bg:#0d1720;--bg2:#101d28;--card:#16232e;--shadow:0 6px 20px rgba(0,0,0,.4)}}
   *{box-sizing:border-box}
   body{margin:0;padding:26px 18px 60px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
@@ -349,4 +679,4 @@ function renderReport(items, key, dateStr, note) {
 </div></body></html>`;
 }
 
-module.exports = { renderDashboard, renderReport };
+module.exports = { renderDashboard, renderReport, parseFilters };

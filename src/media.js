@@ -5,8 +5,10 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const OpenAI = require('openai');
-const { updateMessageText, logExtract } = require('./db');
+const { updateMessageText, logExtract, getGroup } = require('./db');
+const { SELF } = require('./branding');
 const { extractMoney } = require('./extract');
+const { proseCard } = require('./flex');
 
 // client แยกจาก ai.js — งาน media ไม่ผูก replyToken รอได้นานกว่า (60s)
 let _client = null;
@@ -45,14 +47,14 @@ async function describeImage(buf) {
         content: [
           {
             type: 'text',
-            text: 'อธิบายรูปนี้เป็นภาษาไทยกระชับ 1-3 ประโยค ถ้าเป็นสลิปโอนเงิน/เอกสาร/แชท/ตาราง/ข้อความในรูป ให้ถอดข้อความและตัวเลขสำคัญออกมาให้ครบ (ยอดเงิน วันที่เวลา ชื่อ เลขที่) ตอบเฉพาะเนื้อหา ไม่ต้องเกริ่น',
+            text: 'อ่านรูปนี้แล้วตอบเป็นภาษาไทย: รูปทั่วไปอธิบายกระชับ 1-3 ประโยค แต่ถ้ามีข้อความในรูป (สลิปโอนเงิน เอกสาร แชท ตาราง กระดานงาน รายการสั่งของ) ให้ถอดออกมาให้ครบทุกรายการพร้อมตัวเลขสำคัญ (ยอดเงิน วันที่เวลา ชื่อ สถานที่ เลขที่) ถ้าเป็นรายการ/กระดานงาน ให้ขึ้นบรรทัดละรายการ รายการที่ถูกขีดฆ่าหรือติ๊กถูกให้ต่อท้ายว่า [เสร็จแล้ว] ตรงไหนอ่านไม่ชัดใส่ (?) แล้วปิดท้ายด้วยสรุป 1 บรรทัดว่ามีกี่รายการ เสร็จกี่รายการ ตอบเฉพาะเนื้อหา ไม่ต้องเกริ่น',
           },
           { type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } },
         ],
       },
     ],
   });
-  return res.choices[0]?.message?.content?.trim().slice(0, 1200) || '';
+  return res.choices[0]?.message?.content?.trim().slice(0, 3000) || '';
 }
 
 // ---------- เสียง / วิดีโอ (ใช้ ffmpeg — บน Railway ติดตั้งผ่าน nixpacks.toml) ----------
@@ -114,7 +116,8 @@ async function readFileContent(fileName, buf) {
 }
 
 // ---------- จุดเข้า: ประมวลผลแล้วอัพเดท log (เรียกแบบ async ไม่บล็อค webhook) ----------
-async function processMedia(groupId, rowId, msg) {
+// replyCtx = { client, replyToken } — มีเมื่ออยากให้ตอบสรุปกลับเข้ากลุ่มได้ (ใช้เฉพาะกลุ่มที่เปิด !อ่านรูป)
+async function processMedia(groupId, rowId, msg, replyCtx) {
   let text = null;
   try {
     if (msg.type === 'image') {
@@ -136,6 +139,24 @@ async function processMedia(groupId, rowId, msg) {
   // คำอธิบาย/ข้อความที่ถอดได้ อาจมียอดเงิน (เช่นสลิป) → ดักจับต่อเลย
   for (const v of extractMoney(text)) logExtract(groupId, rowId, 'money', v);
   console.log(`[media] อ่าน ${msg.type} สำเร็จ (${text.length} ตัวอักษร)`);
+
+  // กลุ่มที่เปิด !อ่านรูป → ตอบสรุปเข้ากลุ่มทันที (reply ฟรี — token อายุ ~1 นาที ปกติอ่านรูปทัน หมดอายุก็แค่เงียบ log ยังอยู่)
+  // ตอบเป็นการ์ด Flex กรอบเดียวกับคำตอบอื่น (user เคาะ 2026-08-25: เอาแบบกล่อง อ่านง่าย)
+  if (msg.type === 'image' && replyCtx?.replyToken && getGroup(groupId)?.image_reply) {
+    const body = text.replace(/^\[รูป\]\s*/, '');
+    await replyCtx.client
+      .replyMessage({
+        replyToken: replyCtx.replyToken,
+        messages: [
+          proseCard({
+            title: `📷 ${SELF}อ่านรูปให้แล้วค่ะ`,
+            prose: body,
+            footerText: 'ถามต่อจากรูปได้ด้วย !ถาม · ปิดโหมดนี้พิมพ์ !อ่านรูป ปิด',
+          }),
+        ],
+      })
+      .catch((e) => console.error('[media] ตอบสรุปรูปไม่สำเร็จ:', e.message));
+  }
 }
 
 module.exports = { processMedia };

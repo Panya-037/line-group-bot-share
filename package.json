@@ -1,15 +1,23 @@
 {
   "name": "line-group-bot",
   "version": "1.0.0",
-  "description": "บอทเลขากลุ่ม LINE — เก็บ log แชทในกลุ่ม สรุปรายวัน ค้นหาย้อนหลัง ดักจับยอดเงิน ตอบคำถามในกลุ่ม",
+  "description": "บอทเลขากลุ่ม LINE — ตั้งชื่อบอทเองได้ เก็บ log แชท สรุปงานรายวัน ค้นย้อนหลัง อ่านรูป/เสียง/ไฟล์ พร้อมแดชบอร์ดงานที่ต้องทำ",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "seed": "node scripts/seed-mock.js",
     "demo": "node scripts/seed-mock.js && node src/index.js",
-    "test": "node test/run.js"
+    "test": "node test/run.js",
+    "backup": "bash bin/backup-db.sh"
   },
-  "keywords": ["line", "chatbot", "messaging-api", "group", "summary", "dashboard"],
+  "keywords": [
+    "line",
+    "chatbot",
+    "messaging-api",
+    "group",
+    "summary",
+    "dashboard"
+  ],
   "author": "",
   "license": "MIT",
   "type": "commonjs",

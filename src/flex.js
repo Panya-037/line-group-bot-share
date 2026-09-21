@@ -1,16 +1,18 @@
-// การ์ด Flex ทั้งหมดของน้องฟ้าใส — โทนฟ้า-ขาว คลีนๆ (เข้ากับชื่อฟ้าใส)
+// การ์ด Flex ทั้งหมดของบอท — ชื่อบอทกับโทนสีมาจาก src/branding.js (ตั้งที่ .env ไฟล์เดียว)
 // หมายเหตุต้นทุน: Flex = แค่เลย์เอาต์ห่อข้อความเดิม ไม่เรียก AI เพิ่ม + ตอบในกลุ่มด้วย reply = ฟรี
 const dayjs = require('./time');
+const { BOT, SELF, EMOJI, THEME, say } = require('./branding');
 
-const SKY = '#3f9fda'; // หัวการ์ด — ฟ้าใสสดแต่ไม่จัด
-const SKY_DARK = '#1f7ac0'; // ตัวหนังสือหัวข้อ/ตัวเลขเด่น — ฟ้าเข้มอ่านชัดบนขาว
-const SKY_SOFT = '#f4fafe'; // พื้นหลังเนื้อหา — เกือบขาว อมฟ้านิดเดียว คลีน
-const SKY_SUB = '#dceffb'; // ตัวหนังสือรองบนหัวฟ้า — ฟ้าอ่อนมาก
-const DARK = '#213648'; // ตัวหนังสือหลัก — น้ำเงินเข้ม (navy)
-const MUTED = '#8399a8'; // ตัวหนังสือรอง — เทาอมฟ้า
-const LINE_SOFT = '#dbeaf6'; // เส้นคั่น — ฟ้าจาง
+const SKY = THEME.main; // หัวการ์ด
+const SKY_DARK = THEME.dark; // ตัวหนังสือหัวข้อ/ตัวเลขเด่น
+const SKY_SOFT = THEME.soft; // พื้นหลังเนื้อหา
+const SKY_SUB = THEME.sub; // ตัวหนังสือรองบนแถบสี
+const DARK = THEME.ink; // ตัวหนังสือหลัก
+const MUTED = THEME.muted; // ตัวหนังสือรอง
+const LINE_SOFT = THEME.hair; // เส้นคั่น
 
-const t = (text, extra = {}) => ({ type: 'text', text: String(text || '-'), wrap: true, ...extra });
+// ทุกบรรทัดบนการ์ดผ่าน say() — ตั้ง BOT_POLITE=ชาย เมื่อไหร่ คำลงท้ายเปลี่ยนเป็น ครับ ทั้งใบ
+const t = (text, extra = {}) => ({ type: 'text', text: say(String(text || '-')), wrap: true, ...extra });
 
 // วันที่แบบไทย พ.ศ. จาก 'YYYY-MM-DD' เช่น "จ. 24 ก.ค. 2569" (ไว้โชว์บนหัวการ์ดสรุป)
 function thaiDate(dateStr) {
@@ -146,7 +148,7 @@ function workSummaryFlex({ groupName, dateLabel, dateStr, tasks, money, pending 
       layout: 'vertical',
       backgroundColor: SKY_SOFT,
       paddingAll: 'md',
-      contents: [t('น้องคัดเฉพาะเรื่องงานมาให้แล้วนะคะ อยากอ่านละเอียดพิมพ์ !สรุป ได้เลยค่ะ 💙', { size: 'xxs', color: MUTED, align: 'center' })],
+      contents: [t(`${SELF}คัดเฉพาะเรื่องงานมาให้แล้วนะคะ อยากอ่านละเอียดพิมพ์ !สรุป ได้เลยค่ะ ${EMOJI}`, { size: 'xxs', color: MUTED, align: 'center' })],
     },
   };
 
@@ -172,7 +174,7 @@ function answerCard(question, answer) {
     { type: 'separator', color: LINE_SOFT, margin: 'md' },
     ...proseToContents(answer).map((c, i) => (i === 0 ? { ...c, margin: 'md' } : c)),
   ];
-  return bubble({ title: '💬 น้องฟ้าใสตอบ', bodyContents: body, altText: `น้องฟ้าใสตอบ: ${answer}` });
+  return bubble({ title: `💬 ${BOT}ตอบ`, bodyContents: body, altText: `${BOT}ตอบ: ${answer}` });
 }
 
 // ---------- การ์ดผลค้นหา ----------
@@ -212,7 +214,7 @@ function moneyFlex(dateLabel, rows) {
     title: `💰 ยอดเงิน${dateLabel}`,
     subtitle: `เจอ ${rows.length} รายการ`,
     bodyContents: body,
-    footerText: 'น้องจับให้อัตโนมัติจากข้อความ+สลิปนะคะ อยากได้บริบทพิมพ์ !สรุป',
+    footerText: `${SELF}จับให้อัตโนมัติจากข้อความ+สลิปนะคะ อยากได้บริบทพิมพ์ !สรุป`,
     altText: `ยอดเงิน${dateLabel} ${rows.length} รายการ`,
   });
 }
@@ -222,13 +224,14 @@ function helpFlex(hour) {
   const cmds = [
     ['!สรุป', 'สรุปแชทวันนี้ (เมื่อวาน: !สรุปเมื่อวาน)'],
     ['!ค้น <คำ>', 'ค้นข้อความย้อนหลัง'],
-    ['!ถาม <คำถาม>', 'ถามจากประวัติแชท (หรือ @ เราแล้วถาม)'],
+    ['!ถาม <คำถาม>', `ถามจากประวัติแชท (หรือ @ ${SELF}แล้วถาม)`],
     ['!ยอดเงิน', 'ตัวเลขเงินที่จับได้วันนี้'],
+    ['!อ่านรูป เปิด/ปิด', `ส่งรูปปุ๊บ ให้${SELF}สรุปตอบทันที`],
     ['!สรุปอัตโนมัติ เปิด/ปิด', 'สรุปงานรายวันอัตโนมัติ'],
     ['!เวลาสรุป <0-23>', `ตั้งเวลาสรุป (ตอนนี้ ${hour}:00 น.)`],
   ];
   const body = [
-    t('น้องช่วยเก็บแชทให้ค้นย้อนหลัง สรุปงานให้ทุกวัน รูป/สลิป/เสียง/ไฟล์ก็อ่านให้หมดเลยค่ะ 💙', { size: 'sm', color: DARK }),
+    t(`${SELF}ช่วยเก็บแชทให้ค้นย้อนหลัง สรุปงานให้ทุกวัน รูป/สลิป/เสียง/ไฟล์ก็อ่านให้หมดเลยค่ะ ${EMOJI}`, { size: 'sm', color: DARK }),
     { type: 'separator', color: LINE_SOFT, margin: 'lg' },
     ...cmds.map(([cmd, desc], i) => ({
       type: 'box',
@@ -239,28 +242,28 @@ function helpFlex(hour) {
     })),
   ];
   return bubble({
-    title: '📖 น้องฟ้าใสทำอะไรได้บ้าง',
+    title: `📖 ${BOT}ทำอะไรได้บ้าง`,
     bodyContents: body,
-    footerText: 'น้องเห็นเฉพาะข้อความหลังเข้ากลุ่มนะคะ ย้อนก่อนหน้าไม่ได้ค่ะ',
-    altText: 'วิธีใช้น้องฟ้าใส',
+    footerText: `${SELF}เห็นเฉพาะข้อความหลังเข้ากลุ่มนะคะ ย้อนก่อนหน้าไม่ได้ค่ะ`,
+    altText: `วิธีใช้${BOT}`,
   });
 }
 
 // ---------- การ์ดแนะนำตัวตอนเข้ากลุ่ม ----------
 function welcomeFlex() {
   const body = [
-    t('น้องฟ้าใสเป็นบอทผู้ช่วยประจำกลุ่มค่ะ ฝากเนื้อฝากตัวด้วยนะคะ 💙', { size: 'sm', color: DARK }),
-    t('ต่อจากนี้น้องขอช่วยจดแชท สรุปงานให้ทุกวัน ใครอยากค้นเรื่องเก่าหรือถามอะไรย้อนหลัง ทักน้องได้เลยค่ะ', { size: 'sm', color: DARK, margin: 'md' }),
-    t('รูป สลิป เสียงพูด ไฟล์ ส่งมาได้เลยนะคะ น้องอ่านให้หมด 🖼️🎤📄', { size: 'sm', color: DARK, margin: 'md' }),
+    t(`${BOT}เป็นบอทผู้ช่วยประจำกลุ่มค่ะ ฝากเนื้อฝากตัวด้วยนะคะ ${EMOJI}`, { size: 'sm', color: DARK }),
+    t(`ต่อจากนี้${SELF}ขอช่วยจดแชท สรุปงานให้ทุกวัน ใครอยากค้นเรื่องเก่าหรือถามอะไรย้อนหลัง ทัก${SELF}ได้เลยค่ะ`, { size: 'sm', color: DARK, margin: 'md' }),
+    t(`รูป สลิป เสียงพูด ไฟล์ ส่งมาได้เลยนะคะ ${SELF}อ่านให้หมด 🖼️🎤📄`, { size: 'sm', color: DARK, margin: 'md' }),
     { type: 'separator', color: LINE_SOFT, margin: 'lg' },
-    t('พิมพ์ !ช่วย เพื่อดูว่าน้องทำอะไรได้บ้างค่ะ', { size: 'sm', color: SKY_DARK, weight: 'bold', margin: 'lg' }),
+    t(`พิมพ์ !ช่วย เพื่อดูว่า${SELF}ทำอะไรได้บ้างค่ะ`, { size: 'sm', color: SKY_DARK, weight: 'bold', margin: 'lg' }),
   ];
   return bubble({
-    title: '💙 สวัสดีค่ะ น้องฟ้าใสมาแล้ว',
+    title: `${EMOJI} สวัสดีค่ะ ${BOT}มาแล้ว`,
     subtitle: 'บอทผู้ช่วยประจำกลุ่ม',
     bodyContents: body,
-    footerText: 'น้องเห็นเฉพาะข้อความหลังจากนี้นะคะ ย้อนก่อนหน้าไม่ได้ค่ะ 🙏',
-    altText: 'สวัสดีค่ะ น้องฟ้าใส บอทผู้ช่วยประจำกลุ่ม ฝากเนื้อฝากตัวด้วยนะคะ พิมพ์ !ช่วย ดูคำสั่ง',
+    footerText: `${SELF}เห็นเฉพาะข้อความหลังจากนี้นะคะ ย้อนก่อนหน้าไม่ได้ค่ะ 🙏`,
+    altText: `สวัสดีค่ะ ${BOT} บอทผู้ช่วยประจำกลุ่ม ฝากเนื้อฝากตัวด้วยนะคะ พิมพ์ !ช่วย ดูคำสั่ง`,
   });
 }
 

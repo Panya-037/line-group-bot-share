@@ -21,19 +21,21 @@ const { startScheduler, pushDailySummary } = require('./summary');
 const { extractMoney } = require('./extract');
 const { processMedia } = require('./media');
 const { welcomeFlex } = require('./flex');
-const { renderDashboard, renderReport } = require('./dashboard');
+const { renderDashboard, renderReport, parseFilters } = require('./dashboard');
+const { collectWork } = require('./tasks');
+const { BOT, SELF, EMOJI, say } = require('./branding');
 
 // handleCommand คืนได้ทั้ง string / message object (การ์ด) / array → ทำให้เป็น messages เสมอ
 function toMessages(answer) {
   if (Array.isArray(answer)) return answer;
-  if (typeof answer === 'string') return [{ type: 'text', text: answer.slice(0, 4900) }];
-  return [answer]; // การ์ด Flex
+  if (typeof answer === 'string') return [{ type: 'text', text: say(answer).slice(0, 4900) }];
+  return [answer]; // การ์ด Flex (ผ่าน say() มาจาก flex.js แล้ว)
 }
 
-// เตือนคีย์ที่ยังไม่ได้ตั้ง แต่ไม่ปิดเซิร์ฟเวอร์ — จะได้เปิดแดชบอร์ด (โหมด demo) ได้แม้ยังไม่ผูกไลน์
-const missing = ["LINE_CHANNEL_ACCESS_TOKEN", "LINE_CHANNEL_SECRET", "OPENROUTER_API_KEY"].filter((k) => !process.env[k]);
+// เตือนค่าที่ยังไม่ได้ตั้ง แต่ไม่ปิดเซิร์ฟเวอร์ — จะได้เปิดแดชบอร์ดโหมดลองเล่นได้แม้ยังไม่ผูก LINE
+const missing = ['LINE_CHANNEL_ACCESS_TOKEN', 'LINE_CHANNEL_SECRET', 'OPENROUTER_API_KEY'].filter((k) => !process.env[k]);
 if (missing.length) {
-  console.warn(`⚠️  ยังไม่ได้ตั้งค่า: ${missing.join(", ")} — บอทไลน์จะยังไม่ทำงานจนกว่าจะตั้งครบ (แดชบอร์ด /admin ยังเปิดดูได้) ดูวิธีใน README.md`);
+  console.warn(`⚠️  ยังไม่ได้ตั้งค่า: ${missing.join(', ')} — บอทไลน์จะยังไม่ทำงานจนกว่าจะตั้งครบ (แดชบอร์ด /admin ยังเปิดดูได้) ดูวิธีใน README.md`);
 }
 
 const middlewareConfig = { channelSecret: process.env.LINE_CHANNEL_SECRET };
@@ -106,7 +108,7 @@ async function refreshGroupName(srcType, srcId) {
 }
 
 // ---------- webhook ----------
-// ตั้ง LINE_CHANNEL_SECRET แล้วค่อยเปิด /webhook (โหมด demo ไม่มี secret → แดชบอร์ดยังทำงาน)
+// ตั้ง LINE_CHANNEL_SECRET แล้วค่อยเปิด /webhook (โหมดลองเล่นไม่มี secret → แดชบอร์ดยังทำงาน)
 if (process.env.LINE_CHANNEL_SECRET) {
   app.post('/webhook', line.middleware(middlewareConfig), (req, res) => {
     res.sendStatus(200); // ตอบ LINE ก่อน ค่อยประมวลผล (กัน timeout)
@@ -161,7 +163,7 @@ async function handleEvent(event) {
       messages: [
         {
           type: 'text',
-          text: 'สวัสดีค่ะ น้องฟ้าใสเป็นบอทผู้ช่วยประจำกลุ่มนะคะ 💙 ลองเชิญน้องเข้ากลุ่ม (invite เหมือนเพื่อนคนนึง) แล้วน้องจะช่วยจด+สรุปแชทให้ค่ะ พิมพ์ !ช่วย ในกลุ่มดูคำสั่งได้เลยนะคะ',
+          text: say(`สวัสดีค่ะ ${BOT}เป็นบอทผู้ช่วยประจำกลุ่มนะคะ ${EMOJI} ลองเชิญ${SELF}เข้ากลุ่ม (invite เหมือนเพื่อนคนนึง) แล้ว${SELF}จะช่วยจด+สรุปแชทให้ค่ะ พิมพ์ !ช่วย ในกลุ่มดูคำสั่งได้เลยนะคะ`),
         },
       ],
     });
@@ -177,7 +179,9 @@ async function handleEvent(event) {
   if (msg.type !== 'text') {
     const rowId = logMessage(srcId, src.userId, msg.id, msg.type, placeholder(msg));
     if (['image', 'audio', 'video', 'file'].includes(msg.type)) {
-      processMedia(srcId, rowId, msg).catch((e) => console.error('[media]', e.message));
+      // ส่ง replyToken ติดไปด้วย — media.js จะใช้ตอบสรุปทันทีเฉพาะกลุ่มที่เปิด !อ่านรูป
+      const replyCtx = { client, replyToken: event.replyToken };
+      processMedia(srcId, rowId, msg, replyCtx).catch((e) => console.error('[media]', e.message));
     }
     return;
   }
@@ -204,7 +208,7 @@ async function handleEvent(event) {
       await client
         .replyMessage({
           replyToken: event.replyToken,
-          messages: [{ type: 'text', text: 'ขอโทษนะคะ ระบบน้องสะดุดนิดหน่อย ลองใหม่อีกทีได้เลยค่ะ 🙏' }],
+          messages: [{ type: 'text', text: say(`ขอโทษนะคะ ระบบ${SELF}สะดุดนิดหน่อย ลองใหม่อีกทีได้เลยค่ะ 🙏`) }],
         })
         .catch(() => {});
     }
@@ -222,10 +226,50 @@ function checkKey(req, res) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// แดชบอร์ดรายวัน — ภาพรวมทุกกลุ่ม (โค้ดหน้าอยู่ที่ src/dashboard.js)
+// แดชบอร์ด — ภาพรวมตามฟิลเตอร์ ?range=today|7|30 &group=<id> (โค้ดหน้าอยู่ที่ src/dashboard.js)
 app.get('/admin', (req, res) => {
   if (!checkKey(req, res)) return;
-  res.send(renderDashboard(req.query.key));
+  res.send(renderDashboard(req.query.key, req.query));
+});
+
+// งานที่ต้องทำในช่วงที่เลือก — หน้าแดชบอร์ดเรียกทีหลัง (ไม่ให้หน้ารอ AI)
+// ใช้ผลที่ cache ไว้ก่อนเสมอ อ่านใหม่เฉพาะกลุ่ม/วันที่มีข้อความเพิ่ม หรือกดปุ่ม "อ่านใหม่" (force=1)
+app.get('/admin/tasks.json', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const hasAI = !!process.env.OPENROUTER_API_KEY;
+  const f = parseFilters(req.query);
+  const force = req.query.force === '1';
+  // ไม่มีคีย์ AI = ไม่คัดใหม่ แต่ยังโชว์ของที่เคยคัดไว้ได้ (โหมดลองเล่นจะได้เห็นการ์ดจริง)
+  const quota = hasAI ? (force ? 12 : 8) : 0;
+  try {
+    const out = await collectWork({
+      from: f.from,
+      to: f.to,
+      groupId: f.groupId,
+      force,
+      maxFresh: quota,
+    });
+    // เปิดตอนเช้าแล้วยังไม่มีใครคุย = การ์ดว่างเปล่า ไม่มีประโยชน์ → ถอยไปหยิบงานค้าง 7 วันล่าสุดมาโชว์แทน
+    if (!out.items.length && f.range === 'today') {
+      const back = await collectWork({
+        from: dayjs().subtract(6, 'day').format('YYYY-MM-DD'),
+        to: f.to,
+        groupId: f.groupId,
+        force,
+        maxFresh: Math.min(6, quota),
+      });
+      if (back.items.length) {
+        return res.json({ ...back, note: say('วันนี้ยังไม่มีงานใหม่ — นี่คืองานที่ค้างจาก 7 วันล่าสุดค่ะ') });
+      }
+    }
+    if (!hasAI && !out.items.length) {
+      return res.json({ items: [], skipped: 0, note: say(`ยังไม่ได้ตั้ง OPENROUTER_API_KEY — ${SELF}เลยยังคัดงานให้ไม่ได้ค่ะ`) });
+    }
+    res.json(out);
+  } catch (e) {
+    console.error('[tasks.json]', e.message);
+    res.status(500).json({ items: [], skipped: 0, note: say('อ่านงานไม่สำเร็จค่ะ') });
+  }
 });
 
 // รายงานสรุปแชทวันนี้ทุกกลุ่ม (สำหรับดูเอง ไม่ push เข้ากลุ่ม) — cache กัน AI ทำงานซ้ำตอนรีเฟรช
@@ -291,7 +335,7 @@ app.get('/admin/backup', (req, res) => {
 // ---------- start ----------
 const port = process.env.PORT || 3000;
 app.listen(port, async () => {
-  console.log(`line-group-bot ฟังอยู่ที่พอร์ต ${port}`);
+  console.log(`${BOT} (line-group-bot) ฟังอยู่ที่พอร์ต ${port}`);
   try {
     const info = await getBotInfo();
     botUserId = info.userId;
