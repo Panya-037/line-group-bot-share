@@ -18,7 +18,7 @@ const db = require('../src/db');
 const { extractMoney } = require('../src/extract');
 const { handleCommand } = require('../src/commands');
 const flex = require('../src/flex');
-const { renderDashboard, parseFilters } = require('../src/dashboard');
+const { renderDashboard, renderReport, renderOverview, overviewDate, parseFilters } = require('../src/dashboard');
 const branding = require('../src/branding');
 const { collectWork, workItemsFor } = require('../src/tasks');
 
@@ -156,6 +156,22 @@ async function main() {
     const order = [...html.matchAll(/class="tab[^"]*"[^>]*>([^<]+)</g)].map((m) => m[1].trim());
     return order.indexOf('วันนี้') === 0 && order.indexOf('7 วัน') === 1 && order.indexOf('30 วัน') === 2;
   })());
+
+  // ===== หน้าภาพรวมกลุ่ม /admin/overview =====
+  const ovGroups = db.groupsOfDay(today);
+  const ovHtml = renderOverview('test-key', {}, ovGroups);
+  check('หน้าภาพรวมเป็น HTML เต็ม', ovHtml.startsWith('<!doctype html>') && ovHtml.includes('</html>'));
+  check('หน้าภาพรวมใช้ชื่อบอทที่ตั้งเอง', ovHtml.includes('น้องมะลิ · ภาพรวมกลุ่ม'));
+  check('หน้าภาพรวมใช้สีตามธีม', ovHtml.includes(branding.THEMES.green.main));
+  check('หน้าภาพรวมโชว์การ์ดกลุ่มที่คุยวันนี้', ovHtml.includes('กลุ่มงาน'));
+  check('วันที่มั่ว → ถอยกลับมาวันนี้', overviewDate({ date: '2026-02-31' }).date === today);
+  check('วันอนาคต → ถอยกลับมาวันนี้', overviewDate({ date: '2099-01-01' }).date === today);
+  check('เลือกเมื่อวาน → ป้ายบอก "เมื่อวาน"', overviewDate({ date: dayjs().subtract(1, 'day').format('YYYY-MM-DD') }).label === 'เมื่อวาน');
+  check('หน้าภาพรวม escape ปลอดภัย', !/<script>alert/i.test(ovHtml));
+
+  // ===== หน้าอ่านสรุป /admin/report =====
+  const rpHtml = renderReport([], 'test-key', today, '');
+  check('หน้าอ่านสรุปเรนเดอร์ได้', rpHtml.startsWith('<!doctype html>') && rpHtml.includes('น้องมะลิ · สรุปแชทวันนี้'));
 
   console.log(`\n${pass} ผ่าน / ${fail} พัง`);
   for (const s of ['', '-shm', '-wal']) { try { fs.unlinkSync(process.env.DB_PATH + s); } catch {} }

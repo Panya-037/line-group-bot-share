@@ -14,6 +14,8 @@ const {
   deleteByLineMsgId,
   logExtract,
   pushCount,
+  groupsOfDay,
+  talkersOfDay,
 } = require('./db');
 const { handleCommand, summarizeDay } = require('./commands');
 const { getGroupSummary, getGroupMemberProfile, getRoomMemberProfile, getBotInfo } = require('./lineapi');
@@ -21,9 +23,10 @@ const { startScheduler, pushDailySummary } = require('./summary');
 const { extractMoney } = require('./extract');
 const { processMedia } = require('./media');
 const { welcomeFlex } = require('./flex');
-const { renderDashboard, renderReport, parseFilters } = require('./dashboard');
+const { renderDashboard, renderReport, renderOverview, overviewDate, parseFilters } = require('./dashboard');
 const { collectWork } = require('./tasks');
 const { BOT, SELF, EMOJI, say } = require('./branding');
+const { digestFor } = require('./digest');
 
 // handleCommand คืนได้ทั้ง string / message object (การ์ด) / array → ทำให้เป็น messages เสมอ
 function toMessages(answer) {
@@ -269,6 +272,37 @@ app.get('/admin/tasks.json', async (req, res) => {
   } catch (e) {
     console.error('[tasks.json]', e.message);
     res.status(500).json({ items: [], skipped: 0, note: say('อ่านงานไม่สำเร็จค่ะ') });
+  }
+});
+
+// ภาพรวมกลุ่ม — วันนี้ (หรือวันที่เลือก) แต่ละกลุ่มคุยอะไรกันบ้าง
+// หน้าเปล่าออกทันทีพร้อมสถิติจาก DB แล้วให้เบราว์เซอร์ทยอยขอสรุปรายกลุ่มทีหลัง
+app.get('/admin/overview', (req, res) => {
+  if (!checkKey(req, res)) return;
+  const { date } = overviewDate(req.query);
+  const groups = groupsOfDay(date).map((g) => ({ ...g, talkers: g.c ? talkersOfDay(g.id, date) : [] }));
+  res.send(renderOverview(req.query.key, req.query, groups));
+});
+
+// สรุปของกลุ่มเดียวในวันเดียว (หน้า overview เรียกทีละกลุ่ม)
+app.get('/admin/overview/digest.json', async (req, res) => {
+  if (!checkKey(req, res)) return;
+  const group = db.prepare(`SELECT * FROM groups WHERE id = ?`).get(String(req.query.group || ''));
+  if (!group) return res.status(404).json({ error: 'ไม่เจอกลุ่มนี้' });
+  const { date, label } = overviewDate(req.query);
+  if (!process.env.OPENROUTER_API_KEY) {
+    return res.json({ headline: say(`ยังไม่ได้ตั้ง OPENROUTER_API_KEY — ${SELF}เลยสรุปให้ไม่ได้`), topics: [] });
+  }
+  try {
+    const out = await digestFor(group.id, date, {
+      groupName: group.name || 'กลุ่ม',
+      dateLabel: label,
+      force: req.query.force === '1',
+    });
+    res.json(out);
+  } catch (e) {
+    console.error(`[digest] ${group.name}:`, e.message);
+    res.status(500).json({ error: 'สรุปไม่สำเร็จ' });
   }
 });
 

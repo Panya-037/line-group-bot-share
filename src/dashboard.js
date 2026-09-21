@@ -475,7 +475,7 @@ function renderDashboard(key, query = {}) {
         <p class="muted" style="font-size:.82rem">${esc(SELF)}กำลังอ่านแชทช่วง ${esc(f.label)} ${say('ให้อยู่นะคะ')}…</p>
       </div>
     </div>
-    <p style="margin:12px 0 0"><a class="btn ghost" href="/admin/report?key=${k}">📝 อ่านสรุปแบบเต็มของวันนี้ (ไม่ส่งเข้ากลุ่ม)</a></p>
+    <p style="margin:12px 0 0"><a class="btn ghost" href="/admin/overview?key=${k}">🗒️ ดูภาพรวมกลุ่ม — วันนี้แต่ละกลุ่มคุยอะไรกันบ้าง</a></p>
   </section>
 
   <section>
@@ -679,4 +679,242 @@ function renderReport(items, key, dateStr, note) {
 </div></body></html>`;
 }
 
-module.exports = { renderDashboard, renderReport, parseFilters };
+// ---------- หน้าภาพรวมกลุ่ม /admin/overview — วันนี้แต่ละกลุ่มคุยอะไรกันบ้าง ----------
+// สถิติ (ใคร กี่ข้อความ กี่โมง) เรนเดอร์จาก DB ทันที · ส่วนสรุปเนื้อหาให้ JS ทยอยดึงจาก /admin/overview/digest.json
+function hm(ts) {
+  return ts ? dayjs.utc(ts).tz().format('HH:mm') : '';
+}
+
+function overviewDate(q = {}) {
+  const today = dayjs().format('YYYY-MM-DD');
+  const raw = typeof q.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(q.date) ? q.date : today;
+  // วันที่พิมพ์มั่ว (31 ก.พ.) หรือวันในอนาคต → ถอยกลับมาวันนี้ ไม่งั้นหัวข้อกับข้อมูลคนละวันกัน
+  const ok = dayjs(raw).isValid() && dayjs(raw).format('YYYY-MM-DD') === raw;
+  const date = !ok || raw > today ? today : raw;
+  const diff = dayjs(today).diff(dayjs(date), 'day');
+  return { date, today, label: diff === 0 ? 'วันนี้' : diff === 1 ? 'เมื่อวาน' : `วันที่ ${dayjs(date).format('D MMM')}` };
+}
+
+function talkerLine(g) {
+  const bits = [];
+  if (g.first_ts) bits.push(`${hm(g.first_ts)}–${hm(g.last_ts)} น.`);
+  const t = (g.talkers || []).filter((x) => x.name !== 'ไม่ทราบชื่อ');
+  if (t.length) {
+    const head = t.slice(0, 3).map((x) => `${esc(x.name)} ${x.c}`).join(' · ');
+    bits.push(head + (t.length > 3 ? ` · +${t.length - 3} คน` : ''));
+  }
+  if (g.media) bits.push(`📎 ${g.media}`);
+  if (g.money) bits.push(`💰 ${g.money}`);
+  return bits.join(' · ');
+}
+
+function renderOverview(key, query = {}, groups = []) {
+  const { date, today, label } = overviewDate(query);
+  const k = encodeURIComponent(key);
+  const busy = groups.filter((g) => g.c > 0);
+  const silent = groups.filter((g) => g.c === 0);
+  const msgs = busy.reduce((s, g) => s + g.c, 0);
+  const media = busy.reduce((s, g) => s + g.media, 0);
+  const money = busy.reduce((s, g) => s + g.money, 0);
+  const yest = dayjs(today).subtract(1, 'day').format('YYYY-MM-DD');
+
+  const headline = busy.length
+    ? `${label} มี <b>${busy.length}</b> กลุ่มที่คุยกัน รวม <b>${num(msgs)}</b> ข้อความ${
+        media ? ` · ${esc(SELF)}อ่านรูป/ไฟล์ให้ <b>${num(media)}</b> ชิ้น` : ''
+      }${money ? ` · เจอยอดเงิน <b>${money}</b> รายการ` : ''}`
+    : `${label} ${say('ยังไม่มีกลุ่มไหนคุยกันเลยค่ะ')} 🌙`;
+
+  const cards = busy
+    .map(
+      (g) => `<article class="gc" data-group="${esc(g.id)}">
+      <div class="gc-top">
+        <div class="gc-name">${esc(g.name)}${g.active ? '' : ' <span class="pill off">ออกแล้ว</span>'}</div>
+        <div class="gc-count">${num(g.c)} ข้อความ</div>
+      </div>
+      <div class="gc-meta">${talkerLine(g)}</div>
+      <div class="gc-body"><div class="skel"></div><div class="skel s2"></div></div>
+      <div class="gc-foot">
+        <a href="/admin?key=${k}&range=today&group=${encodeURIComponent(g.id)}">ดูตัวเลขกลุ่มนี้ →</a>
+      </div>
+    </article>`,
+    )
+    .join('');
+
+  return `<!doctype html><html lang="th"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(BOT)} · ภาพรวมกลุ่ม</title>
+<style>
+  :root{--sky:${T.main};--sky-dark:${T.dark};--ink:${T.ink};--muted:${T.muted};--hair:${T.hair};
+    --bg:${T.bg};--bg2:${T.bg2};--card:#fff;--soft:${T.soft};--good:#2fa36b;--warn:#e08a2b;--down:#d1607a;
+    --shadow:0 4px 16px rgba(${T.shadowRgb},.10)}
+  @media(prefers-color-scheme:dark){:root{--ink:#dce8f2;--muted:#8299ac;--hair:#22333f;--bg:#0d1720;--bg2:#101d28;
+    --card:#16232e;--soft:#132029;--shadow:0 6px 20px rgba(0,0,0,.4)}}
+  *{box-sizing:border-box}
+  body{margin:0;padding:22px 16px 60px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    background:linear-gradient(165deg,var(--bg),var(--bg2));min-height:100vh;color:var(--ink);-webkit-font-smoothing:antialiased}
+  .wrap{max-width:820px;margin:0 auto}
+  h1{font-size:1.35rem;margin:0 0 3px}
+  .sub{color:var(--muted);font-size:.86rem;margin:0 0 16px}
+  .muted{color:var(--muted)}
+  .fbar{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+    background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:9px 10px;box-shadow:var(--shadow);margin-bottom:16px}
+  .tabs{display:flex;gap:4px;background:var(--soft);border-radius:10px;padding:3px}
+  .tab{padding:7px 13px;border-radius:8px;font-size:.84rem;font-weight:600;color:var(--muted);text-decoration:none}
+  .tab.on{background:var(--sky);color:#fff}
+  .fbar input[type=date]{font:inherit;font-size:.82rem;color:var(--ink);background:var(--soft);border:1px solid var(--hair);
+    border-radius:10px;padding:7px 9px;margin-left:auto}
+  .lead{background:var(--card);border:1px solid var(--hair);border-radius:16px;box-shadow:var(--shadow);
+    padding:15px 16px;font-size:.96rem;line-height:1.6;margin-bottom:8px}
+  .lead b{color:var(--sky-dark)}
+  .actions{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 18px}
+  .btn{display:inline-block;background:var(--sky);color:#fff;text-decoration:none;padding:8px 13px;border-radius:9px;
+    font:inherit;font-size:.8rem;font-weight:600;border:none;cursor:pointer}
+  .btn.ghost{background:transparent;color:var(--sky-dark);border:1px solid var(--hair)}
+  .btn:disabled{opacity:.55}
+  .gc{background:var(--card);border:1px solid var(--hair);border-radius:16px;box-shadow:var(--shadow);
+    padding:15px 16px 12px;margin-bottom:14px}
+  .gc-top{display:flex;align-items:baseline;gap:10px}
+  .gc-name{font-weight:800;font-size:1rem;color:var(--sky-dark);flex:1;min-width:0}
+  .gc-count{font-size:.74rem;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .gc-meta{font-size:.74rem;color:var(--muted);margin-top:4px;line-height:1.6}
+  .gc-body{margin-top:11px}
+  .gc-head{font-weight:700;font-size:.93rem;line-height:1.5;margin-bottom:8px}
+  .tp{padding:7px 0;border-top:1px solid var(--hair)}
+  .tp-t{font-weight:600;font-size:.88rem;line-height:1.45}
+  .tp-d{font-size:.84rem;color:var(--muted);line-height:1.55;margin-top:2px}
+  .fu{margin:10px 0 0;padding:9px 11px;background:var(--soft);border-radius:10px;font-size:.83rem;line-height:1.55}
+  .fu b{color:var(--warn)}
+  .fu ul{margin:4px 0 0;padding-left:18px}
+  .raw{font-size:.84rem;line-height:1.6}
+  .raw li{margin-bottom:3px;list-style:none}
+  .raw .t{color:var(--muted);font-variant-numeric:tabular-nums;font-size:.76rem;margin-right:5px}
+  .raw .w{font-weight:600}
+  .gc-foot{margin-top:11px;padding-top:9px;border-top:1px solid var(--hair);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .gc-foot a{color:var(--sky-dark);text-decoration:none;font-size:.78rem;font-weight:600}
+  .tag{background:var(--soft);border:1px solid var(--hair);border-radius:999px;padding:2px 9px;font-size:.73rem;color:var(--muted)}
+  .pill.off{font-size:.66rem;padding:2px 7px;border-radius:999px;font-weight:700;background:rgba(209,96,122,.14);color:var(--down)}
+  .skel{height:13px;border-radius:7px;background:var(--soft);margin:9px 0}
+  .skel.s2{width:65%}
+  details{background:var(--card);border:1px solid var(--hair);border-radius:14px;padding:6px 14px 2px;box-shadow:var(--shadow)}
+  summary{cursor:pointer;color:var(--muted);font-size:.82rem;padding:6px 0}
+  .silent{font-size:.82rem;color:var(--muted);line-height:1.9;padding-bottom:8px}
+  .foot{color:var(--muted);font-size:.76rem;text-align:center;margin-top:24px}
+  .foot a{color:var(--sky-dark)}
+</style></head><body><div class="wrap">
+
+  <h1>🗒️ ภาพรวมกลุ่ม</h1>
+  <p class="sub">${thaiDateFull(date)}<span style="opacity:.5;margin:0 6px">•</span>อ่านตอน ${dayjs().format('HH:mm')} น.</p>
+
+  <div class="fbar">
+    <div class="tabs">
+      <a class="tab${date === today ? ' on' : ''}" href="/admin/overview?key=${k}">วันนี้</a>
+      <a class="tab${date === yest ? ' on' : ''}" href="/admin/overview?key=${k}&date=${yest}">เมื่อวาน</a>
+    </div>
+    <form method="get" action="/admin/overview">
+      <input type="hidden" name="key" value="${esc(key)}">
+      <input type="date" name="date" value="${date}" max="${today}" onchange="this.form.submit()">
+    </form>
+  </div>
+
+  <p class="lead">${headline}</p>
+  <div class="actions">
+    <a class="btn ghost" href="/admin?key=${k}">← กลับแดชบอร์ด</a>
+    ${busy.length ? '<button class="btn ghost" id="again" type="button">อ่านใหม่ทั้งหมด</button>' : ''}
+  </div>
+
+  ${cards || `<p class="muted">${say('ลองเลือกวันอื่นดูนะคะ')}</p>`}
+
+  ${
+    silent.length
+      ? `<details><summary>กลุ่มที่เงียบ${esc(label)} (${silent.length})</summary>
+          <div class="silent">${silent.map((g) => esc(g.name)).join('<br>')}</div></details>`
+      : ''
+  }
+
+  <p class="foot"><a href="/admin/report?key=${k}">📝 อยากอ่านสรุปแบบร้อยแก้วยาว ๆ ของวันนี้</a></p>
+</div>
+<script>
+(function(){
+  var KEY = ${JSON.stringify(k)};
+  var DATE = ${JSON.stringify(date)};
+  var cards = Array.prototype.slice.call(document.querySelectorAll('.gc'));
+  var again = document.getElementById('again');
+
+  function el(tag, cls, text){ var e=document.createElement(tag); if(cls) e.className=cls; if(text!=null) e.textContent=text; return e; }
+
+  function fill(card, d){
+    var body = card.querySelector('.gc-body');
+    body.innerHTML='';
+    if(d.error){ body.appendChild(el('p','muted','${say('สรุปไม่สำเร็จ ลองกดอ่านใหม่อีกทีนะคะ')}')); return; }
+
+    if(d.raw && d.raw.length){            // ข้อความไม่กี่บรรทัด — โชว์ของจริง
+      var ul=el('ul','raw'); ul.style.margin='0'; ul.style.padding='0';
+      d.raw.forEach(function(r){
+        var li=el('li');
+        li.appendChild(el('span','t', r.time));
+        li.appendChild(el('span','w', r.who+': '));
+        li.appendChild(document.createTextNode(r.text));
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+    } else {
+      if(d.headline) body.appendChild(el('div','gc-head', d.headline));
+      (d.topics||[]).forEach(function(t){
+        var w=el('div','tp');
+        if(t.title) w.appendChild(el('div','tp-t','• '+t.title));
+        if(t.detail) w.appendChild(el('div','tp-d', t.detail));
+        body.appendChild(w);
+      });
+      if(!d.headline && !(d.topics||[]).length) body.appendChild(el('p','muted','${say('วันนี้ไม่มีอะไรเป็นเรื่องเป็นราวค่ะ')}'));
+      if((d.followups||[]).length){
+        var fu=el('div','fu');
+        fu.appendChild(el('b','','⏳ ต้องตามต่อ'));
+        var ul2=el('ul');
+        d.followups.forEach(function(x){ ul2.appendChild(el('li',null,x)); });
+        fu.appendChild(ul2);
+        body.appendChild(fu);
+      }
+    }
+    if(d.stale){
+      var st=el('p','muted','* มีข้อความใหม่เข้ามาหลังสรุปนี้ — กด "อ่านใหม่ทั้งหมด" เพื่ออัปเดต');
+      st.style.fontSize='.73rem'; st.style.marginTop='9px';
+      body.appendChild(st);
+    }
+    if(d.taskCount){
+      var foot=card.querySelector('.gc-foot');
+      if(foot && !foot.querySelector('.tag')) foot.insertBefore(el('span','tag','✅ งานที่ต้องทำ '+d.taskCount), foot.firstChild);
+    }
+  }
+
+  function load(card, force){
+    var g = card.getAttribute('data-group');
+    var body = card.querySelector('.gc-body');
+    body.innerHTML='<div class="skel"></div><div class="skel s2"></div>';
+    return fetch('/admin/overview/digest.json?key='+KEY+'&date='+DATE+'&group='+encodeURIComponent(g)+(force?'&force=1':''))
+      .then(function(r){ if(!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function(d){ fill(card, d); })
+      .catch(function(){ fill(card, {error:true}); });
+  }
+
+  // ทีละ 2 กลุ่ม — การ์ดแรกๆ ขึ้นเร็ว ไม่ยิงพร้อมกันรัวๆ
+  function runAll(force){
+    if(again){ again.disabled=true; again.textContent='กำลังอ่าน…'; }
+    var i=0;
+    function next(){
+      if(i>=cards.length) return Promise.resolve();
+      var c=cards[i++];
+      return load(c, force).then(next);
+    }
+    return Promise.all([next(), next()]).then(function(){
+      if(again){ again.disabled=false; again.textContent='อ่านใหม่ทั้งหมด'; }
+    });
+  }
+
+  if(again) again.addEventListener('click', function(){ runAll(true); });
+  runAll(false);
+})();
+</script>
+</body></html>`;
+}
+
+module.exports = { renderDashboard, renderReport, renderOverview, overviewDate, parseFilters };
