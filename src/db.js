@@ -1,5 +1,6 @@
 const Database = require('better-sqlite3');
 const path = require('path');
+const brief = require('./brief');
 
 const db = new Database(process.env.DB_PATH || path.join(__dirname, '..', 'groupbot.db'));
 db.pragma('journal_mode = WAL');
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS digests (
   date TEXT NOT NULL,               -- วันไทย YYYY-MM-DD
   last_msg_id INTEGER,              -- ข้อความล่าสุดตอนสรุป — เปลี่ยน = สรุปใหม่
   json TEXT,                        -- {"headline":"","topics":[],"followups":[]}
+  brief_key TEXT DEFAULT '',        -- บรีฟ (SUMMARY_FOCUS) ที่ใช้ตอนสรุป — เปลี่ยนบรีฟ = สรุปใหม่
   computed_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (group_id, date)
 );
@@ -58,6 +60,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   date TEXT NOT NULL,               -- วันไทย YYYY-MM-DD
   last_msg_id INTEGER,              -- ข้อความล่าสุดตอนคำนวณ — เปลี่ยน = ต้องให้ AI อ่านใหม่
   json TEXT,                        -- {"tasks":[],"money":[],"pending":[]}
+  brief_key TEXT DEFAULT '',        -- บรีฟ (SUMMARY_FOCUS) ที่ใช้ตอนคัด — เปลี่ยนบรีฟ = คัดใหม่
   computed_at TEXT DEFAULT (datetime('now')),
   PRIMARY KEY (group_id, date)
 );
@@ -75,6 +78,15 @@ if (ver < 2) {
   const cols = db.prepare(`PRAGMA table_info(groups)`).all().map((c) => c.name);
   if (!cols.includes('image_reply')) db.exec(`ALTER TABLE groups ADD COLUMN image_reply INTEGER DEFAULT 0`);
   db.pragma('user_version = 2');
+}
+
+// migration: v3 (2026-11-02) แคชผล AI จำว่าสรุปด้วยบรีฟไหน — เปลี่ยน SUMMARY_FOCUS แล้วของเก่าจะถูกสรุปใหม่
+if (ver < 3) {
+  for (const table of ['work_items', 'digests']) {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes('brief_key')) db.exec(`ALTER TABLE ${table} ADD COLUMN brief_key TEXT DEFAULT ''`);
+  }
+  db.pragma('user_version = 3');
 }
 
 // ---------- groups ----------
@@ -199,13 +211,14 @@ function extractsOfDay(groupId, dateStr) {
 function getWorkItems(groupId, dateStr) {
   return db.prepare(`SELECT * FROM work_items WHERE group_id = ? AND date = ?`).get(groupId, dateStr);
 }
-function saveWorkItems(groupId, dateStr, lastMsgId, data) {
+// briefKey = บรีฟที่ใช้ตอนคัด (ค่าเริ่มต้น = บรีฟปัจจุบัน) — tasks.js เทียบตอนอ่านแคช
+function saveWorkItems(groupId, dateStr, lastMsgId, data, briefKey = brief.KEY) {
   db.prepare(
-    `INSERT INTO work_items (group_id, date, last_msg_id, json, computed_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
+    `INSERT INTO work_items (group_id, date, last_msg_id, json, brief_key, computed_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(group_id, date) DO UPDATE SET
-       last_msg_id = excluded.last_msg_id, json = excluded.json, computed_at = excluded.computed_at`,
-  ).run(groupId, dateStr, lastMsgId, JSON.stringify(data));
+       last_msg_id = excluded.last_msg_id, json = excluded.json, brief_key = excluded.brief_key, computed_at = excluded.computed_at`,
+  ).run(groupId, dateStr, lastMsgId, JSON.stringify(data), briefKey);
 }
 // กลุ่ม+วันที่มีการคุยกันจริงในช่วงที่เลือก (ไว้ไล่คัดงาน) — เรียงวันใหม่ไปเก่า
 // ไม่ได้เจาะจงกลุ่ม = เอาเฉพาะกลุ่มที่บอทยังอยู่ (กลุ่มที่ออกมาแล้วไม่มีงานให้ตามต่อ)
@@ -227,13 +240,13 @@ function activeGroupDays(from, to, groupId = null) {
 function getDigest(groupId, dateStr) {
   return db.prepare(`SELECT * FROM digests WHERE group_id = ? AND date = ?`).get(groupId, dateStr);
 }
-function saveDigest(groupId, dateStr, lastMsgId, data) {
+function saveDigest(groupId, dateStr, lastMsgId, data, briefKey = brief.KEY) {
   db.prepare(
-    `INSERT INTO digests (group_id, date, last_msg_id, json, computed_at)
-     VALUES (?, ?, ?, ?, datetime('now'))
+    `INSERT INTO digests (group_id, date, last_msg_id, json, brief_key, computed_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))
      ON CONFLICT(group_id, date) DO UPDATE SET
-       last_msg_id = excluded.last_msg_id, json = excluded.json, computed_at = excluded.computed_at`,
-  ).run(groupId, dateStr, lastMsgId, JSON.stringify(data));
+       last_msg_id = excluded.last_msg_id, json = excluded.json, brief_key = excluded.brief_key, computed_at = excluded.computed_at`,
+  ).run(groupId, dateStr, lastMsgId, JSON.stringify(data), briefKey);
 }
 
 // สถิติรายกลุ่มของวันหนึ่ง (ไว้ทำหน้าภาพรวม) — ทุกกลุ่มที่บอทยังอยู่ + กลุ่มที่ออกแล้วแต่วันนั้นมีแชท

@@ -1,5 +1,5 @@
 // ชุดทดสอบแบบ offline — ไม่ต้องมี LINE token หรือ OpenRouter key (รันใน CI ได้เลย)
-// ครอบคลุม: ชื่อ/ธีมบอทจาก .env, db, ดักจับยอดเงิน, mention, คำสั่งที่ไม่เรียก AI,
+// ครอบคลุม: ชื่อ/ธีมบอทจาก .env, บรีฟสรุป (SUMMARY_FOCUS), db, ดักจับยอดเงิน, mention, คำสั่งที่ไม่เรียก AI,
 //          โครงการ์ด Flex, งานที่ต้องทำ (cache ไม่เรียก AI ซ้ำ), แดชบอร์ด + ฟิลเตอร์
 const os = require('os');
 const path = require('path');
@@ -11,6 +11,8 @@ process.env.ADMIN_KEY = 'test-key';
 // ตั้งชื่อ+ธีมเองเหมือนลูกค้าทำใน .env (ต้องตั้งก่อน require เพราะ branding อ่านตอนโหลด)
 process.env.BOT_NAME = 'น้องมะลิ';
 process.env.BOT_THEME = 'green';
+// บรีฟสรุปที่ผู้ดูแลตั้ง — ต้องไปโผล่ใน prompt ทุกตัว + แดชบอร์ด
+process.env.SUMMARY_FOCUS = 'เน้นออเดอร์และยอดโอน ไม่ต้องสรุปเรื่องส่วนตัว';
 for (const s of ['', '-shm', '-wal']) { try { fs.unlinkSync(process.env.DB_PATH + s); } catch {} }
 
 const dayjs = require('../src/time');
@@ -20,7 +22,9 @@ const { handleCommand } = require('../src/commands');
 const flex = require('../src/flex');
 const { renderDashboard, renderReport, renderOverview, overviewDate, parseFilters } = require('../src/dashboard');
 const branding = require('../src/branding');
-const { collectWork, workItemsFor } = require('../src/tasks');
+const brief = require('../src/brief');
+const { prompts } = require('../src/ai');
+const { collectWork, workItemsFor, cacheFresh } = require('../src/tasks');
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -113,6 +117,20 @@ async function main() {
   check('การ์ดต้อนรับใช้ชื่อที่ตั้งเอง', cards.welcomeFlex.altText.includes('น้องมะลิ'));
   check('การ์ดใช้สีตามธีมที่ตั้ง', cards.helpFlex.contents.header.backgroundColor === branding.THEMES.green.main);
 
+  // ===== บรีฟสรุป — ผู้ดูแลสั่งว่าให้สรุปอะไรบ้าง =====
+  check('บรีฟมาจาก SUMMARY_FOCUS', brief.SOURCE === 'env' && brief.FOCUS.includes('ออเดอร์') && brief.KEY.length === 10);
+  check('ไม่ตั้งอะไรเลย = ไม่มีบรีฟ ไม่แตะ prompt', (() => { const b = brief.resolve({}, { readFile: () => '' }); return b.SOURCE === 'none' && b.block() === '' && b.KEY === ''; })());
+  check('อ่านบรีฟจากไฟล์ได้ + ข้ามบรรทัด #', (() => { const b = brief.resolve({}, { readFile: () => '# หมายเหตุ\nเน้นงานก่อสร้าง\n\n\n- ตามใบเสนอราคา\n' }); return b.SOURCE === 'file' && b.FOCUS === 'เน้นงานก่อสร้าง\n\n- ตามใบเสนอราคา'; })());
+  check('.env ชนะไฟล์', brief.resolve({ SUMMARY_FOCUS: 'จาก env' }, { readFile: () => 'จากไฟล์' }).FOCUS === 'จาก env');
+  check('SUMMARY_FOCUS_FILE ชี้ไฟล์อื่นได้', (() => { let seen = null; brief.resolve({ SUMMARY_FOCUS_FILE: './x.txt' }, { readFile: (f) => { seen = f; return 'ok'; } }); return seen === './x.txt'; })());
+  check('ไม่ชี้ไฟล์ = อ่าน brief.txt ข้าง package.json', (() => { let seen = null; brief.resolve({}, { readFile: (f) => { seen = f; return ''; } }); return seen === brief.DEFAULT_FILE; })());
+  check('บรีฟยาวเกินถูกตัด', (() => { const b = brief.resolve({ SUMMARY_FOCUS: 'ก'.repeat(brief.MAX_CHARS + 50) }); return b.TRUNCATED && b.FOCUS.length === brief.MAX_CHARS; })());
+  check('บรีฟต่างกัน = KEY ต่างกัน', brief.resolve({ SUMMARY_FOCUS: 'ก' }).KEY !== brief.resolve({ SUMMARY_FOCUS: 'ข' }).KEY);
+  check('prompt สรุปทุกตัวมีบรีฟต่อท้าย', ['summarize', 'work', 'digest'].every((k) => prompts[k]().includes('เน้นออเดอร์และยอดโอน')));
+  check('prompt ตอบคำถามมีบรีฟด้วย', prompts.answer('กลุ่มทดสอบ').includes('เน้นออเดอร์และยอดโอน') && prompts.answer('กลุ่มทดสอบ').includes('น้องมะลิ'));
+  check('ไม่มีบรีฟ = prompt เดิม ไม่มีก้อนคำสั่ง', !prompts.work('').includes('คำสั่งจากผู้ดูแลระบบ') && !prompts.summarize('').includes('คำสั่งจากผู้ดูแลระบบ'));
+  check('บรีฟไม่ทำโครง JSON หาย', prompts.work().includes('"tasks"') && prompts.digest().includes('"headline"'));
+
   // ===== งานที่ต้องทำ — ต้องไม่เรียก AI ซ้ำถ้าไม่มีข้อความใหม่ =====
   const today = dayjs().format('YYYY-MM-DD');
   db.ensureGroup('G2');
@@ -124,6 +142,10 @@ async function main() {
   db.saveWorkItems('G2', today, rowsToday[rowsToday.length - 1].id, { tasks: [{ task: 'ทำสไลด์', owner: 'พลอย', due: 'พรุ่งนี้' }], money: [], pending: [] });
   const cachedWork = await workItemsFor('G2', today, { groupName: 'กลุ่มงาน' });
   check('งานที่ cache ไว้ = ไม่เรียก AI', cachedWork.usedAI === false && cachedWork.data.tasks.length === 1);
+  check('แคชงานจำบรีฟที่ใช้คัด', db.getWorkItems('G2', today).brief_key === brief.KEY);
+  check('เปลี่ยนบรีฟ = แคชเก่าใช้ไม่ได้ ต้องคัดใหม่', cacheFresh({ last_msg_id: 1, brief_key: 'old' }, 1) === false && cacheFresh({ last_msg_id: 1, brief_key: brief.KEY }, 1) === true && cacheFresh({ last_msg_id: 2, brief_key: brief.KEY }, 1) === false);
+  db.saveDigest('G2', today, 1, { headline: 'x', topics: [], followups: [] });
+  check('แคชภาพรวมจำบรีฟที่ใช้สรุป', db.getDigest('G2', today).brief_key === brief.KEY);
   const collected = await collectWork({ from: today, to: today, groupId: 'G2' });
   check('รวมงานทั้งช่วงได้จาก cache', collected.usedAI === 0 && collected.items[0].tasks[0].task === 'ทำสไลด์');
   db.ensureGroup('G3');
@@ -140,6 +162,7 @@ async function main() {
   check('แดชบอร์ด escape ปลอดภัย', !/<script>alert/i.test(html));
   check('ลิงก์ backup มี key', html.includes('/admin/backup?key=test-key'));
   check('การ์ดงานที่ต้องทำอยู่บนหน้า', html.includes('งานที่ต้องทำ'));
+  check('แดชบอร์ดโชว์บรีฟที่ใช้อยู่ในกล่องข้อมูลระบบ', html.includes('บรีฟสรุป (SUMMARY_FOCUS ใน .env)') && html.includes('เน้นออเดอร์และยอดโอน'));
 
   // ===== ฟิลเตอร์ช่วง/กลุ่ม =====
   check('ช่วงเริ่มต้น = วันนี้', parseFilters({}).range === 'today');

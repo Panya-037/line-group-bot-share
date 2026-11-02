@@ -3,6 +3,7 @@
 const dayjs = require('./time');
 const { db, pushCount } = require('./db');
 const { BOT, SELF, EMOJI, THEME: T, say } = require('./branding');
+const brief = require('./brief');
 
 const D = "date(ts,'+7 hours')"; // แปลง UTC → วันไทย
 const esc = (s) =>
@@ -314,6 +315,13 @@ function moneyList(rows, f) {
 }
 
 // ---------- หน้าแดชบอร์ด ----------
+// บรีฟสรุปที่ใช้อยู่ — ให้คนดูแลเห็นว่าบอทถูกสั่งให้เก็บอะไร (พับอยู่ในกล่องข้อมูลระบบ)
+function briefLine() {
+  if (!brief.FOCUS) return 'สรุปแบบทั่วไป (งาน/นัด/เงิน/เรื่องค้าง) — ยังไม่ได้ตั้งบรีฟสรุป SUMMARY_FOCUS หรือ brief.txt<br>';
+  const from = brief.SOURCE === 'env' ? 'SUMMARY_FOCUS ใน .env' : 'ไฟล์ brief.txt';
+  return `📋 บรีฟสรุป (${from}): ${esc(brief.FOCUS).replace(/\n/g, '<br>')}<br>`;
+}
+
 function renderDashboard(key, query = {}) {
   const f = parseFilters(query);
   const d = gather(f);
@@ -515,6 +523,7 @@ function renderDashboard(key, query = {}) {
     <div class="sys-body">
       โควต้าส่งสรุปเข้ากลุ่มเดือนนี้ ${d.push}/300 ${pushWarn ? '<span class="warn">· ใกล้เต็มแล้ว</span>' : ''}<br>
       รู้จักสมาชิก ${num(d.totals.members)} คน · เก็บข้อความสะสม ${num(d.totals.messages)} ข้อความ · กลุ่มทั้งหมด ${d.totals.groups} (ยังอยู่ ${d.totals.activeGroups})<br>
+      ${briefLine()}
       <a href="/admin/backup?key=${k}">⬇︎ ดาวน์โหลดสำรองข้อมูล (.db)</a>
     </div>
   </details>

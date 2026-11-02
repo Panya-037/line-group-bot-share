@@ -3,11 +3,17 @@
 // เปิดแดชบอร์ดซ้ำ/ถึงเวลา push = อ่านของเดิม ไม่เรียก AI ใหม่ ถ้าไม่มีข้อความใหม่เข้ามา
 const { messagesOfDay, getWorkItems, saveWorkItems, activeGroupDays } = require('./db');
 const { extractWorkItems } = require('./ai');
+const brief = require('./brief');
 
 const QUIET_MIN = 3; // ต่ำกว่านี้ถือว่าแชทเงียบ ไม่คุ้มเรียก AI
 const EMPTY = { tasks: [], money: [], pending: [] };
 
 const inflight = new Map(); // กันเรียก AI ซ้อนตอนเปิดแดชบอร์ดรัวๆ
+
+// แคชใช้ได้เมื่อไม่มีข้อความใหม่ *และ* คัดด้วยบรีฟตัวเดียวกับตอนนี้ (เปลี่ยน SUMMARY_FOCUS = อ่านใหม่)
+function cacheFresh(cached, lastId) {
+  return !!cached && cached.last_msg_id === lastId && (cached.brief_key || '') === brief.KEY;
+}
 
 function shape(data) {
   return {
@@ -25,7 +31,7 @@ async function workItemsFor(groupId, dateStr, { groupName = 'กลุ่ม', f
   const lastId = rows[rows.length - 1].id;
   if (!force) {
     const cached = getWorkItems(groupId, dateStr);
-    if (cached && cached.last_msg_id === lastId) {
+    if (cacheFresh(cached, lastId)) {
       try {
         return { data: shape(JSON.parse(cached.json)), quiet: false, usedAI: false, count: rows.length };
       } catch {
@@ -55,7 +61,7 @@ async function collectWork({ from, to, groupId = null, maxFresh = 8, force = fal
 
   for (const d of days) {
     const cached = getWorkItems(d.group_id, d.date);
-    const isFresh = cached && cached.last_msg_id === d.last_msg_id && !force;
+    const isFresh = !force && cacheFresh(cached, d.last_msg_id);
     if (!isFresh && fresh >= maxFresh) {
       skipped++; // เกินโควต้ารอบนี้ — กดอัพเดตอีกทีค่อยอ่านต่อ
       continue;
@@ -74,4 +80,4 @@ async function collectWork({ from, to, groupId = null, maxFresh = 8, force = fal
   return { items, skipped, usedAI: fresh };
 }
 
-module.exports = { workItemsFor, collectWork, QUIET_MIN };
+module.exports = { workItemsFor, collectWork, cacheFresh, QUIET_MIN };

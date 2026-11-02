@@ -3,6 +3,7 @@
 const dayjs = require('./time');
 const { messagesOfDay, getDigest, saveDigest, getWorkItems, talkersOfDay } = require('./db');
 const { digestDay } = require('./ai');
+const brief = require('./brief');
 
 const LIGHT_MAX = 3; // ต่ำกว่านี้ = ข้อความไม่กี่บรรทัด โชว์ของจริงดีกว่าให้ AI สรุป
 const FRESH_MIN = 5; // สรุปที่เพิ่งทำไม่ถึงกี่นาที ถือว่ายังใหม่พอ ไม่ต้องเรียก AI ซ้ำ
@@ -34,7 +35,8 @@ async function digestFor(groupId, dateStr, { groupName = 'กลุ่ม', date
 
   if (!force) {
     const cached = getDigest(groupId, dateStr);
-    if (cached) {
+    // สรุปด้วยบรีฟคนละตัว (เปลี่ยน SUMMARY_FOCUS แล้ว) = ถือว่าไม่มีแคช
+    if (cached && (cached.brief_key || '') === brief.KEY) {
       // ยอดข้อความเท่าเดิม = ใช้ของเดิมได้เลย · มีข้อความใหม่แต่เพิ่งสรุปไปไม่ถึง 5 นาที = ยังใช้ของเดิม
       // (กันคนกดรีเฟรชรัวๆ ตอนกลุ่มกำลังคุยกันแล้วเรียก AI ทุกครั้ง) แต่ติดธง stale ให้หน้าเว็บบอกว่ามีของใหม่
       const sameTip = cached.last_msg_id === lastId;
