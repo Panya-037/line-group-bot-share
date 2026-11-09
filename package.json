@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "chat": "node scripts/try-chat.js",
-    "test": "node test/run.js",
+    "test": "node test/run.js && node test/vercel.js && node test/webhook.js",
     "backup": "bash bin/backup-db.sh"
   },
   "keywords": [
@@ -20,7 +20,10 @@
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@libsql/client": "^0.18.0",
     "@line/bot-sdk": "^11.2.0",
+    "@vercel/functions": "^3.11.0",
     "better-sqlite3": "^12.11.1",
     "dayjs": "^1.11.21",
     "dotenv": "^17.4.2",

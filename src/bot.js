@@ -62,14 +62,14 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
 
   // จำชื่อคนคุย — ยังไม่รู้ชื่อค่อยยิง API (ได้เฉพาะคนที่แอดบอทเป็นเพื่อน)
   async function rememberUser(userId) {
-    if (db.userName(userId)) return;
+    if (await db.userName(userId)) return;
     let name = null;
     try {
       name = (await client.getProfile(userId))?.displayName || null;
     } catch {
       /* โปรไฟล์ไม่เปิด — ข้าม */
     }
-    db.upsertUser(userId, name);
+    await db.upsertUser(userId, name);
   }
 
   async function leave(src) {
@@ -109,14 +109,14 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
     if (event.type === 'follow') {
       await rememberUser(userId);
       const hi = greeting(env);
-      db.logMessage(userId, 'bot', null, 'text', say(hi));
+      await db.logMessage(userId, 'bot', null, 'text', say(hi));
       await send(event.replyToken, null, hi);
       return 'greeted';
     }
 
     // --- คนกด unsend → ลบตาม ---
     if (event.type === 'unsend' && event.unsend?.messageId) {
-      db.deleteByLineMsgId(event.unsend.messageId);
+      await db.deleteByLineMsgId(event.unsend.messageId);
       return 'unsent';
     }
 
@@ -126,7 +126,7 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
 
     // --- เพดานต่อวัน: ครบแล้วตอบสั้นๆ ไม่เรียก AI ---
     const limit = dailyLimit(env);
-    if (limit && db.userMessagesToday(userId) >= limit) {
+    if (limit && (await db.userMessagesToday(userId)) >= limit) {
       await send(event.replyToken, null, `วันนี้คุยกับ${SELF}ครบ ${limit} ข้อความแล้วค่ะ พรุ่งนี้ทักมาใหม่ได้เลยนะคะ 🙏`);
       return 'limit';
     }
@@ -138,19 +138,19 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
 
     // --- เก็บข้อความ (สื่อ = อ่านก่อนแล้วเขียนทับ placeholder) ---
     if (msg.type === 'text') {
-      db.logMessage(userId, 'user', msg.id, 'text', msg.text);
+      await db.logMessage(userId, 'user', msg.id, 'text', msg.text);
     } else {
-      const rowId = db.logMessage(userId, 'user', msg.id, msg.type, placeholder(msg));
+      const rowId = await db.logMessage(userId, 'user', msg.id, msg.type, placeholder(msg));
       if (MEDIA_TYPES.includes(msg.type)) {
         const read = await media.readMedia(msg);
-        if (read) db.updateMessageText(rowId, read);
+        if (read) await db.updateMessageText(rowId, read);
       }
     }
 
     // --- ให้ AI ตอบจากคำสั่งประจำตัว + บทสนทนาที่ผ่านมา ---
     let answer;
     try {
-      answer = await ai.chatReply(db.recentMessages(userId), { name: db.userName(userId) });
+      answer = await ai.chatReply(await db.recentMessages(userId), { name: await db.userName(userId) });
     } catch (e) {
       console.error('[ai]', e.message);
       await send(event.replyToken, userId, `ขอโทษนะคะ ระบบ${SELF}สะดุดนิดหน่อย ลองพิมพ์ใหม่อีกทีได้เลยค่ะ 🙏`);
@@ -158,7 +158,7 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
     }
     if (!answer) answer = `ขอโทษค่ะ ${SELF}ยังตอบเรื่องนี้ไม่ได้ ลองพิมพ์อีกแบบดูนะคะ`;
     const out = say(answer).slice(0, 4900);
-    db.logMessage(userId, 'bot', null, 'text', out);
+    await db.logMessage(userId, 'bot', null, 'text', out);
     await send(event.replyToken, userId, out);
     return 'answered';
   }

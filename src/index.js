@@ -3,7 +3,7 @@ const express = require('express');
 const line = require('@line/bot-sdk');
 const path = require('path');
 const dayjs = require('./time');
-const { db } = require('./db');
+const storage = require('./db');
 const { createBot } = require('./bot');
 const { BOT } = require('./branding');
 const brief = require('./brief');
@@ -24,10 +24,15 @@ const app = express();
 // ---------- webhook ----------
 if (process.env.LINE_CHANNEL_SECRET) {
   app.post('/webhook', line.middleware({ channelSecret: process.env.LINE_CHANNEL_SECRET }), (req, res) => {
-    res.sendStatus(200); // ตอบ LINE ก่อน ค่อยประมวลผล (กัน timeout)
-    for (const event of req.body.events || []) {
-      bot.handleEvent(event).catch((e) => console.error('[event]', e.message));
-    }
+    // Register the work before acknowledging LINE, so Vercel keeps it alive.
+    const work = (async () => {
+      for (const event of req.body.events || []) {
+        try { await bot.handleEvent(event); }
+        catch { console.error('[event] ประมวลผลไม่สำเร็จ'); }
+      }
+    })();
+    if (process.env.VERCEL) require('@vercel/functions').waitUntil(work);
+    res.sendStatus(200);
   });
 } else {
   app.post('/webhook', (_req, res) => res.status(503).send('LINE ยังไม่ได้ตั้งค่า — ดู INSTALL.md'));
@@ -45,15 +50,24 @@ app.use((err, _req, res, next) => {
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // ดาวน์โหลดไฟล์ฐานข้อมูลไว้สำรอง (bin/backup-db.sh เรียกทุกคืน) — ต้องมี ADMIN_KEY
-app.get('/admin/backup', (req, res) => {
-  if (!process.env.ADMIN_KEY || req.query.key !== process.env.ADMIN_KEY) return res.status(403).send('forbidden');
+app.get('/admin/backup', async (req, res, next) => {
+  if (!process.env.ADMIN_KEY || (req.get('authorization') !== `Bearer ${process.env.ADMIN_KEY}` && req.query.key !== process.env.ADMIN_KEY)) return res.status(403).send('forbidden');
+  res.set('Cache-Control', 'no-store');
+  if (storage.exportData) {
+    try {
+      const data = await storage.exportData();
+      res.attachment(`chatbot-${dayjs().format('YYYY-MM-DD')}.json`);
+      return res.json(data);
+    } catch (err) { return next(err); }
+  }
   const file = process.env.DB_PATH || path.join(__dirname, '..', 'chatbot.db');
-  db.pragma('wal_checkpoint(TRUNCATE)');
+  storage.db.pragma('wal_checkpoint(TRUNCATE)');
   res.download(file, `chatbot-${dayjs().format('YYYY-MM-DD')}.db`);
 });
 
 // ---------- start ----------
 const port = process.env.PORT || 3000;
+if (require.main === module && !process.env.VERCEL) {
 app.listen(port, () => {
   console.log(`${BOT} (line-chatbot) ฟังอยู่ที่พอร์ต ${port}`);
   console.log(
@@ -62,3 +76,5 @@ app.listen(port, () => {
       : `[brief] ใช้คำสั่งประจำตัวจาก ${brief.SOURCE === 'env' ? 'BOT_BRIEF ใน .env' : 'ไฟล์ brief.txt'} (${brief.TEXT.length} ตัวอักษร)`,
   );
 });
+}
+module.exports = app;

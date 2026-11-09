@@ -55,7 +55,9 @@ async function describeImage(buf) {
 
 // ---------- เสียง / วิดีโอ (ต้องมี ffmpeg — บน Railway ตั้ง RAILPACK_DEPLOY_APT_PACKAGES=ffmpeg) ----------
 function ffmpeg(args) {
-  execFileSync('ffmpeg', ['-y', '-loglevel', 'error', ...args], { stdio: ['ignore', 'ignore', 'inherit'] });
+  const executable = process.env.VERCEL ? require('@ffmpeg-installer/ffmpeg').path : 'ffmpeg';
+  if (!executable) throw new Error('ไม่พบ ffmpeg สำหรับระบบนี้');
+  execFileSync(executable, ['-y', '-loglevel', 'error', ...args], { timeout: 15000, stdio: ['ignore', 'ignore', 'pipe'] });
 }
 function tmpFile(name) {
   return path.join(os.tmpdir(), `chatbot-${process.pid}-${name}`);

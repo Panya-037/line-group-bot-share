@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 120,
+      "includeFiles": ["brief.txt", "node_modules/@ffmpeg-installer/linux-x64/**", "node_modules/@ffmpeg-installer/linux-arm64/**"]
+    }
+  },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }]
+}

@@ -1,4 +1,8 @@
 // SQLite — เก็บบทสนทนาแชทส่วนตัวของแต่ละคน ไว้ให้บอทจำได้ว่าคุยอะไรกันไปแล้ว
+if (process.env.TURSO_DATABASE_URL) {
+  module.exports = require('./remote-db').createRemoteDb();
+} else {
+if (process.env.VERCEL) throw new Error('ตั้ง TURSO_DATABASE_URL และ TURSO_AUTH_TOKEN ก่อนใช้งานบน Vercel');
 const Database = require('better-sqlite3');
 const path = require('path');
 
@@ -80,3 +84,4 @@ module.exports = {
   recentMessages,
   userMessagesToday,
 };
+}
