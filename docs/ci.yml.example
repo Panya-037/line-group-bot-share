@@ -24,9 +24,7 @@ jobs:
         run: npm ci
       - name: รันเทส
         run: npm test
-      - name: เช็คว่า seed + แดชบอร์ดทำงาน (smoke test)
+      - name: เช็คว่าเซิร์ฟเวอร์บูตได้ (smoke test)
         run: |
-          node scripts/seed-mock.js
-          node -e "const {renderDashboard}=require('./src/dashboard');const h=renderDashboard('test-key');if(!h.includes('แดชบอร์ด'))process.exit(1);console.log('แดชบอร์ด render ได้')"
-        env:
-          ADMIN_KEY: test-key
+          PORT=3999 node src/index.js & sleep 2
+          curl -fsS http://localhost:3999/health

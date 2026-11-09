@@ -1,23 +1,19 @@
 // อ่านคอนเทนต์ที่ไม่ใช่ข้อความ — โหลดไฟล์จาก LINE แล้วให้ AI อ่าน/ถอดความ
-// ผลลัพธ์เขียนทับ placeholder ใน messages → ค้นหา/สรุป/ถามต่อได้เหมือนข้อความปกติ
+// คืนเป็นข้อความ เช่น "[รูป] สลิปโอน 500 บาท" → บอทเอาไปคุยต่อได้เหมือนข้อความที่พิมพ์มา
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const OpenAI = require('openai');
-const { updateMessageText, logExtract, getGroup } = require('./db');
-const { SELF } = require('./branding');
-const { extractMoney } = require('./extract');
-const { proseCard } = require('./flex');
 
-// client แยกจาก ai.js — งาน media ไม่ผูก replyToken รอได้นานกว่า (60s)
+// client แยกจาก ai.js — ไฟล์ใหญ่ใช้เวลานานกว่า แต่ต้องเหลือเวลาให้ตอบทันอายุ replyToken
 let _client = null;
 function client() {
   _client ??= new OpenAI({
     baseURL: 'https://openrouter.ai/api/v1',
     apiKey: process.env.OPENROUTER_API_KEY,
-    timeout: 60000,
-    maxRetries: 1,
+    timeout: 40000,
+    maxRetries: 0,
   });
   return _client;
 }
@@ -47,7 +43,7 @@ async function describeImage(buf) {
         content: [
           {
             type: 'text',
-            text: 'อ่านรูปนี้แล้วตอบเป็นภาษาไทย: รูปทั่วไปอธิบายกระชับ 1-3 ประโยค แต่ถ้ามีข้อความในรูป (สลิปโอนเงิน เอกสาร แชท ตาราง กระดานงาน รายการสั่งของ) ให้ถอดออกมาให้ครบทุกรายการพร้อมตัวเลขสำคัญ (ยอดเงิน วันที่เวลา ชื่อ สถานที่ เลขที่) ถ้าเป็นรายการ/กระดานงาน ให้ขึ้นบรรทัดละรายการ รายการที่ถูกขีดฆ่าหรือติ๊กถูกให้ต่อท้ายว่า [เสร็จแล้ว] ตรงไหนอ่านไม่ชัดใส่ (?) แล้วปิดท้ายด้วยสรุป 1 บรรทัดว่ามีกี่รายการ เสร็จกี่รายการ ตอบเฉพาะเนื้อหา ไม่ต้องเกริ่น',
+            text: 'อ่านรูปนี้แล้วตอบเป็นภาษาไทย: รูปทั่วไปอธิบายกระชับ 1-3 ประโยค แต่ถ้ามีข้อความในรูป (สลิปโอนเงิน เอกสาร แชท ตาราง รายการสั่งของ ฉลากสินค้า) ให้ถอดออกมาให้ครบพร้อมตัวเลขสำคัญ (ยอดเงิน วันที่เวลา ชื่อ เลขที่) ตรงไหนอ่านไม่ชัดใส่ (?) ตอบเฉพาะเนื้อหา ไม่ต้องเกริ่น',
           },
           { type: 'image_url', image_url: { url: `data:${mime};base64,${buf.toString('base64')}` } },
         ],
@@ -57,12 +53,12 @@ async function describeImage(buf) {
   return res.choices[0]?.message?.content?.trim().slice(0, 3000) || '';
 }
 
-// ---------- เสียง / วิดีโอ (ใช้ ffmpeg — บน Railway ติดตั้งผ่าน nixpacks.toml) ----------
+// ---------- เสียง / วิดีโอ (ต้องมี ffmpeg — บน Railway ตั้ง RAILPACK_DEPLOY_APT_PACKAGES=ffmpeg) ----------
 function ffmpeg(args) {
   execFileSync('ffmpeg', ['-y', '-loglevel', 'error', ...args], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
 function tmpFile(name) {
-  return path.join(os.tmpdir(), `groupbot-${process.pid}-${name}`);
+  return path.join(os.tmpdir(), `chatbot-${process.pid}-${name}`);
 }
 
 async function transcribeAudio(buf, messageId) {
@@ -115,48 +111,20 @@ async function readFileContent(fileName, buf) {
   return null; // นามสกุลอื่น — เก็บแค่ชื่อไฟล์พอ
 }
 
-// ---------- จุดเข้า: ประมวลผลแล้วอัพเดท log (เรียกแบบ async ไม่บล็อค webhook) ----------
-// replyCtx = { client, replyToken } — มีเมื่ออยากให้ตอบสรุปกลับเข้ากลุ่มได้ (ใช้เฉพาะกลุ่มที่เปิด !อ่านรูป)
-async function processMedia(groupId, rowId, msg, replyCtx) {
-  let text = null;
+// ---------- จุดเข้า: อ่านแล้วคืนข้อความ (null = อ่านไม่ได้ ให้ใช้ placeholder เดิม) ----------
+async function readMedia(msg) {
   try {
-    if (msg.type === 'image') {
-      text = `[รูป] ${await describeImage(await downloadContent(msg.id))}`;
-    } else if (msg.type === 'audio') {
-      text = `[เสียงพูด] ${await transcribeAudio(await downloadContent(msg.id), msg.id)}`;
-    } else if (msg.type === 'video') {
-      text = `[วิดีโอ] ${await describeVideo(await downloadContent(msg.id), msg.id)}`;
-    } else if (msg.type === 'file') {
+    if (msg.type === 'image') return `[รูป] ${await describeImage(await downloadContent(msg.id))}`;
+    if (msg.type === 'audio') return `[เสียงพูด] ${await transcribeAudio(await downloadContent(msg.id), msg.id)}`;
+    if (msg.type === 'video') return `[วิดีโอ] ${await describeVideo(await downloadContent(msg.id), msg.id)}`;
+    if (msg.type === 'file') {
       const body = await readFileContent(msg.fileName || '', await downloadContent(msg.id));
-      if (body) text = `[ไฟล์ ${msg.fileName}] ${body}`;
+      return body ? `[ไฟล์ ${msg.fileName}] ${body}` : null;
     }
   } catch (e) {
     console.error(`[media] ${msg.type} ${msg.id}:`, e.message);
-    return; // อ่านไม่ได้ก็ปล่อย placeholder เดิมไว้
   }
-  if (!text) return;
-  updateMessageText(rowId, text);
-  // คำอธิบาย/ข้อความที่ถอดได้ อาจมียอดเงิน (เช่นสลิป) → ดักจับต่อเลย
-  for (const v of extractMoney(text)) logExtract(groupId, rowId, 'money', v);
-  console.log(`[media] อ่าน ${msg.type} สำเร็จ (${text.length} ตัวอักษร)`);
-
-  // กลุ่มที่เปิด !อ่านรูป → ตอบสรุปเข้ากลุ่มทันที (reply ฟรี — token อายุ ~1 นาที ปกติอ่านรูปทัน หมดอายุก็แค่เงียบ log ยังอยู่)
-  // ตอบเป็นการ์ด Flex กรอบเดียวกับคำตอบอื่น (user เคาะ 2026-08-25: เอาแบบกล่อง อ่านง่าย)
-  if (msg.type === 'image' && replyCtx?.replyToken && getGroup(groupId)?.image_reply) {
-    const body = text.replace(/^\[รูป\]\s*/, '');
-    await replyCtx.client
-      .replyMessage({
-        replyToken: replyCtx.replyToken,
-        messages: [
-          proseCard({
-            title: `📷 ${SELF}อ่านรูปให้แล้วค่ะ`,
-            prose: body,
-            footerText: 'ถามต่อจากรูปได้ด้วย !ถาม · ปิดโหมดนี้พิมพ์ !อ่านรูป ปิด',
-          }),
-        ],
-      })
-      .catch((e) => console.error('[media] ตอบสรุปรูปไม่สำเร็จ:', e.message));
-  }
+  return null;
 }
 
-module.exports = { processMedia };
+module.exports = { readMedia };

@@ -1,0 +1,53 @@
+// ลองคุยกับบอทใน Terminal ก่อนผูก LINE — ใช้คำสั่งประจำตัว (brief.txt) และชื่อบอทจาก .env ชุดเดียวกับของจริง
+// ใช้:  npm run chat   (ต้องตั้ง OPENROUTER_API_KEY ใน .env ก่อน)  ·  พิมพ์ "ออก" หรือกด Ctrl+C เพื่อจบ
+require('dotenv').config();
+const readline = require('readline');
+const { chatReply } = require('../src/ai');
+const { BOT, say } = require('../src/branding');
+const brief = require('../src/brief');
+
+if (!process.env.OPENROUTER_API_KEY) {
+  console.error('ยังไม่ได้ตั้ง OPENROUTER_API_KEY ในไฟล์ .env — ใส่คีย์ก่อนแล้วลองใหม่');
+  process.exit(1);
+}
+
+console.log(`คุยกับ ${BOT} (โหมดลองในเครื่อง ไม่บันทึกลงฐานข้อมูล)`);
+console.log(
+  brief.SOURCE === 'none'
+    ? 'ยังไม่มี brief.txt — บอทจะตอบแบบผู้ช่วยทั่วไป'
+    : `ใช้คำสั่งประจำตัว ${brief.TEXT.length} ตัวอักษร จาก ${brief.SOURCE === 'env' ? 'BOT_BRIEF ใน .env' : 'brief.txt'}`,
+);
+console.log('พิมพ์ "ออก" เพื่อจบ\n');
+
+const rows = []; // บทสนทนาในหน่วยความจำ — โครงเดียวกับตาราง messages
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: 'คุณ: ' });
+let closed = false;
+const prompt = () => {
+  if (!closed) rl.prompt();
+};
+
+async function handle(line) {
+  const text = line.trim();
+  if (!text) return prompt();
+  if (text === 'ออก' || text === 'exit') return closed || rl.close();
+  rows.push({ role: 'user', type: 'text', text, ts: new Date().toISOString() });
+  try {
+    const answer = say((await chatReply(rows, { name: 'ผู้ทดสอบ' })) || '(ไม่มีคำตอบ)');
+    rows.push({ role: 'bot', type: 'text', text: answer, ts: new Date().toISOString() });
+    console.log(`\n${BOT}: ${answer}\n`);
+  } catch (e) {
+    console.error(`\n❌ เรียก AI ไม่สำเร็จ: ${e.message}\n`);
+  }
+  prompt();
+}
+
+// ต่อคิวทีละข้อความ — พิมพ์รัวหรือส่งไฟล์เข้าทาง stdin ก็ตอบครบตามลำดับ และรอคำตอบสุดท้ายก่อนปิด
+let queue = Promise.resolve();
+rl.prompt();
+rl.on('line', (line) => {
+  queue = queue.then(() => handle(line));
+});
+rl.on('close', () => {
+  closed = true;
+  queue.then(() => process.exit(0));
+});

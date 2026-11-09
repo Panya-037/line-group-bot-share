@@ -1,6 +1,6 @@
 #!/bin/bash
 # สำรองฐานข้อมูลจากบอทที่รันอยู่บนคลาวด์ ลงเครื่องตัวเอง (เก็บย้อนหลัง 14 วัน)
-# ใช้คู่กับ launchd/backup.plist.example — ถ้า volume บนคลาวด์พัง log แชท/ตั้งค่ากลุ่มยังกู้จากที่นี่ได้
+# ใช้คู่กับ launchd/backup.plist.example — ถ้า volume บนคลาวด์พัง บทสนทนายังกู้จากที่นี่ได้
 #
 # ใช้ค่าจาก .env:  APP_URL (ที่อยู่บอท) + ADMIN_KEY
 # รันมือ:  bash bin/backup-db.sh
@@ -22,8 +22,8 @@ fi
 
 mkdir -p -m 700 "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
-find "$BACKUP_DIR" -maxdepth 1 -type f -name 'groupbot-*.db' -mtime +13 -exec rm -f -- {} +
-OUT="$BACKUP_DIR/groupbot-$(date +%Y%m%d).db"
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'chatbot-*.db' -mtime +13 -exec rm -f -- {} +
+OUT="$BACKUP_DIR/chatbot-$(date +%Y%m%d).db"
 TMP="$OUT.part"
 trap 'rm -f "$TMP" "$TMP-shm" "$TMP-wal"' EXIT
 

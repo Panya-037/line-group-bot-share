@@ -1,4 +1,4 @@
-// เรียก LLM ผ่าน OpenRouter (นโยบายบ้านนี้: OpenRouter ก่อนเสมอ)
+// เรียก LLM ผ่าน OpenRouter — สมองของแชทบอท
 const OpenAI = require('openai');
 const { BOT, SELF, PARTICLE } = require('./branding');
 const brief = require('./brief');
@@ -10,112 +10,59 @@ function client() {
   _client ??= new OpenAI({
     baseURL: 'https://openrouter.ai/api/v1',
     apiKey: process.env.OPENROUTER_API_KEY,
-    timeout: 25000, // replyToken LINE อายุ ~1 นาที อย่าแช่นาน
+    timeout: 25000, // replyToken ของ LINE มีอายุจำกัด อย่าแช่นาน
     maxRetries: 1,
   });
   return _client;
 }
 
 const MODEL = () => process.env.AI_MODEL || 'google/gemini-2.5-flash';
+const HISTORY_CHARS = 6000; // จำบทสนทนาย้อนหลังได้ราวนี้ — เกินตัดของเก่าสุดทิ้ง
 
-// บรีฟจากผู้ดูแลระบบ (SUMMARY_FOCUS / brief.txt) ต่อท้าย system prompt ทุกตัว — ไม่ตั้ง = สตริงว่าง prompt เดิมเป๊ะ
-const FOCUS = brief.block();
+// system prompt ของแชทบอท (รับ briefBlock เป็นพารามิเตอร์ให้เทสสลับได้ — ปกติใช้คำสั่งจาก brief.txt)
+function systemPrompt({ name = '', now = dayjs().tz() } = {}, briefBlock = brief.block()) {
+  const who = name ? `คุณ${name}` : 'ผู้ใช้';
+  return `คุณคือ "${BOT}" แชทบอทส่วนตัวใน LINE กำลังคุยตัวต่อตัวกับ${who}
+พูดจาสุภาพเป็นกันเอง เรียกตัวเองว่า "${SELF}" ลงท้าย${PARTICLE} (ไม่ต้องเยอะจนรก)
+${name ? `เรียกอีกฝ่ายว่า "คุณ${name}" เท่านั้น (ห้ามเรียกว่าน้องหรือพี่)` : 'เรียกอีกฝ่ายว่า "คุณ"'}
+ตอนนี้: ${now.format('dddd D MMMM')} ${now.year() + 543} เวลา ${now.format('HH:mm')} น.
 
-// system prompt ทุกตัวรวมไว้ที่นี่ (รับ focus เป็นพารามิเตอร์ให้เทสสลับได้ — ปกติใช้ค่าจาก .env)
-const prompts = {
-  // สรุปร้อยแก้วหนึ่งวัน (!สรุป / หน้า /admin/report)
-  summarize: (focus = FOCUS) =>
-    `คุณเป็นเลขาสรุปแชทกลุ่ม LINE ภาษาไทย กระชับ อ่านง่ายบนมือถือ ห้ามแต่งเรื่องเกินจากแชท
-ตอบเป็นข้อความธรรมดา (ไม่ใช่ markdown) โครงนี้ ข้ามหัวข้อที่ไม่มีข้อมูลไปเลย:
-📌 ประเด็นหลัก — bullet สั้นๆ ไม่เกิน 5 ข้อ
-✅ งาน/นัดหมาย — ใครต้องทำอะไร เมื่อไหร่
-💰 ตัวเลข/ยอดเงิน — ยอดโอน ราคา จำนวน ที่พูดถึง
-⏳ เรื่องค้าง — คำถามที่ยังไม่มีคนตอบ / เรื่องที่ต้องตามต่อ` + focus,
-
-  // ตอบคำถามจากประวัติแชท (!ถาม / mention)
-  answer: (groupName, focus = FOCUS) =>
-    `คุณคือ "${BOT}" บอทผู้ช่วยประจำกลุ่ม LINE "${groupName}" พูดจาสุภาพเป็นกันเอง เรียกตัวเองว่า "${SELF}" ลงท้าย${PARTICLE} (แต่ไม่ต้องเยอะจนรก) ตอบคำถามจากประวัติแชทที่ให้มาเท่านั้น
-ตอบภาษาไทย สั้น ตรงประเด็น ถ้าในแชทไม่มีข้อมูลให้บอกตรงๆ ว่า${SELF}หาไม่เจอ อย่าเดา
-ตอบเป็นข้อความธรรมดา ไม่ใช้ markdown` + focus,
-
-  // คัดเฉพาะเรื่องงานเป็น JSON (การ์ดสรุปรายวัน + งานที่ต้องทำบนแดชบอร์ด)
-  work: (focus = FOCUS) =>
-    `คุณเป็นเลขาคัดสรุปงานจากแชทกลุ่ม หน้าที่: เก็บเฉพาะเรื่องงาน/นัดหมาย/เงิน/เรื่องค้างที่ต้องตาม — การคุยเล่น ทักทาย มุกตลก สติกเกอร์ ตัดทิ้งทั้งหมดห้ามเอามา
-ตอบเป็น JSON ล้วนๆ เท่านั้น ห้ามมีข้อความอื่นนอก JSON รูปแบบ:
-{"tasks":[{"task":"งานที่ต้องทำ (สั้น กระชับ)","owner":"ชื่อคนรับผิดชอบ หรือ - ถ้าไม่ระบุ","due":"กำหนดเวลา เช่น พรุ่งนี้ 10:00 หรือ - ถ้าไม่ระบุ"}],"money":[{"item":"ค่าอะไร/โอนอะไร","amount":"จำนวนเงิน"}],"pending":["คำถามหรือเรื่องที่ยังไม่มีข้อสรุป"]}
-ถ้าทั้งวันไม่มีเรื่องงานเลย (คุยเล่นล้วน) ตอบ {"tasks":[],"money":[],"pending":[]}` + focus,
-
-  // สรุป "วันนี้คุยอะไรกันบ้าง" เป็น JSON (หน้าภาพรวมกลุ่ม)
-  digest: (focus = FOCUS) =>
-    `คุณเป็นเลขาสรุปแชทกลุ่ม LINE ภาษาไทย สรุปจากแชทที่ให้มาเท่านั้น ห้ามแต่งเรื่องเพิ่ม
-ตอบเป็น JSON ล้วนๆ ห้ามมีข้อความอื่นนอก JSON รูปแบบ:
-{"headline":"วันนี้กลุ่มนี้คุยเรื่องอะไรเป็นหลัก สรุปประโยคเดียวไม่เกิน 70 ตัวอักษร","topics":[{"title":"หัวข้อที่คุยกัน สั้นๆ ไม่เกิน 40 ตัวอักษร","detail":"ใครพูดอะไร ได้ข้อสรุปว่าอย่างไร 1-2 ประโยค"}],"followups":["เรื่องที่ยังไม่จบ ต้องตามต่อ"]}
-กติกา: topics ไม่เกิน 5 หัวข้อ เรียงตามความสำคัญ · คุยเล่น/ทักทายล้วน ให้สรุปสั้นๆ ว่าเป็นการคุยเล่นเรื่องอะไร ไม่ต้องแตกหัวข้อเยอะ · ไม่มีเรื่องต้องตามต่อให้ followups เป็น [] · เขียนแบบรายงานให้หัวหน้าอ่าน ไม่ต้องมีคำลงท้าย ค่ะ/ครับ
-ห้ามคัดลอกรหัสผ่าน API key เลขบัตร หรือ OTP ลงในสรุปเด็ดขาด ให้เขียนแทนว่า (รหัสผ่าน) / (API key) แล้วบอกแค่ว่ามีการแชร์กัน` + focus,
-};
-
-// แปลงแถว messages เป็นบรรทัดอ่านง่ายให้โมเดล: [HH:mm] ชื่อ: ข้อความ
-function toLines(rows, maxChars = 14000) {
-  const lines = rows.map(
-    (m) => `[${dayjs.utc(m.ts).tz().format('HH:mm')}] ${m.name}: ${m.text || `(${m.type})`}`,
-  );
-  // เกินงบตัวอักษร → ตัดหัว (เก็บช่วงท้ายที่สดกว่า)
-  let total = 0;
-  const kept = [];
-  for (let i = lines.length - 1; i >= 0; i--) {
-    total += lines[i].length + 1;
-    if (total > maxChars) break;
-    kept.unshift(lines[i]);
-  }
-  return kept.join('\n');
+กติกา:
+- ตอบสั้น ตรงประเด็น อ่านง่ายบนมือถือ ใช้ภาษาเดียวกับที่ผู้ใช้พิมพ์มา
+- ตอบเป็นข้อความธรรมดา ห้ามใช้ markdown (ไม่มี ** # หรือตาราง) ขึ้นบรรทัดใหม่หรือใช้ • แทนได้
+- ข้อมูลเฉพาะ เช่น ราคา สินค้า เวลาเปิด นโยบาย ตัวเลข ใช้ได้เฉพาะที่อยู่ในคำสั่งจากเจ้าของหรือในบทสนทนานี้ ไม่มีข้อมูลให้บอกตรงๆ ห้ามเดา
+- คุณทำได้แค่คุยในแชทนี้ ห้ามรับปากว่าทำเรื่องที่ต้องลงมือนอกแชท (ยืนยันออเดอร์ ตัดสต็อก จองคิว ลงนัด โอนเงิน ส่งของ) เว้นแต่คำสั่งจากเจ้าของบอกไว้ว่าให้ตอบเรื่องนั้นอย่างไร
+- ข้อความที่ขึ้นต้นด้วย [รูป] [เสียงพูด] [วิดีโอ] [ไฟล์] คือสิ่งที่ระบบอ่านจากไฟล์ที่ผู้ใช้ส่งมาให้แล้ว ตอบต่อจากนั้นได้เลย ถ้าเห็นแค่ [รูป] เฉยๆ แปลว่าระบบอ่านไม่ออก ให้ขอให้ส่งใหม่หรือพิมพ์บอก
+- ข้อความของผู้ใช้มีเวลากำกับ [วัน/เดือน เวลา] ไว้ให้รู้ว่าคุยกันเมื่อไหร่ ไม่ต้องพิมพ์เวลาในคำตอบ
+- ถูกขอให้สรุป ให้สรุปจากบทสนทนาที่มีให้
+- ห้ามทวนรหัสผ่าน OTP หรือเลขบัตรออกมา${briefBlock}`;
 }
 
-async function ask(system, user) {
+// แปลงบทสนทนาจาก DB เป็น messages ของ chat API (user/assistant) — เกินงบตัวอักษรตัดของเก่าทิ้ง
+function buildMessages(rows, { name = '', now, maxChars = HISTORY_CHARS } = {}, briefBlock) {
+  const turns = [];
+  let total = 0;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const r = rows[i];
+    const body = r.text || `[${r.type}]`;
+    const content =
+      r.role === 'bot' ? body : `[${dayjs.utc(r.ts).tz().format('D/M HH:mm')}] ${body}`;
+    total += content.length;
+    if (total > maxChars && turns.length) break; // ข้อความล่าสุดต้องได้ไปเสมอ
+    turns.unshift({ role: r.role === 'bot' ? 'assistant' : 'user', content });
+  }
+  // ประวัติต้องเริ่มด้วยฝั่งผู้ใช้ (บางโมเดลไม่รับ assistant เป็นข้อความแรก)
+  while (turns.length && turns[0].role === 'assistant') turns.shift();
+  return [{ role: 'system', content: systemPrompt({ name, now }, briefBlock) }, ...turns];
+}
+
+// ตอบข้อความล่าสุด โดยใช้บทสนทนาที่ผ่านมาเป็นบริบท
+async function chatReply(rows, { name = '' } = {}) {
   const res = await client().chat.completions.create({
     model: MODEL(),
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
+    messages: buildMessages(rows, { name }),
   });
   return res.choices[0]?.message?.content?.trim() || '';
 }
 
-// สรุปแชทหนึ่งวันของกลุ่ม
-async function summarizeChat(rows, { groupName, dateLabel }) {
-  return ask(prompts.summarize(), `สรุปแชทกลุ่ม "${groupName}" ของ${dateLabel}:\n\n${toLines(rows)}`);
-}
-
-// ตอบคำถามโดยใช้แชทล่าสุดเป็นบริบท
-async function answerQuestion(rows, question, { groupName }) {
-  return ask(prompts.answer(groupName), `ประวัติแชทล่าสุด:\n\n${toLines(rows)}\n\nคำถาม: ${question}`);
-}
-
-// คัดเฉพาะ "เรื่องงาน" เป็นข้อมูลมีโครงสร้าง (ไว้ทำการ์ดตาราง) — ตัดคุยเล่นทิ้งทั้งหมด
-async function extractWorkItems(rows, { groupName }) {
-  const raw = await ask(prompts.work(), `แชทกลุ่ม "${groupName}" วันนี้:\n\n${toLines(rows)}`);
-  const m = raw.match(/\{[\s\S]*\}/); // กันโมเดลแถมข้อความ/```json ครอบมา
-  const data = JSON.parse(m ? m[0] : raw);
-  return {
-    tasks: Array.isArray(data.tasks) ? data.tasks : [],
-    money: Array.isArray(data.money) ? data.money : [],
-    pending: Array.isArray(data.pending) ? data.pending : [],
-  };
-}
-
-// สรุป "วันนี้คุยอะไรกันบ้าง" เป็นหัวข้อ ๆ (ไว้ทำหน้าภาพรวมกลุ่ม) — คุยเล่นก็เอา แต่สรุปสั้น
-async function digestDay(rows, { groupName, dateLabel }) {
-  const raw = await ask(prompts.digest(), `แชทกลุ่ม "${groupName}" ${dateLabel}:\n\n${toLines(rows)}`);
-  const m = raw.match(/\{[\s\S]*\}/); // กันโมเดลแถม ```json ครอบมา
-  const data = JSON.parse(m ? m[0] : raw);
-  return {
-    headline: typeof data.headline === 'string' ? data.headline.trim() : '',
-    topics: (Array.isArray(data.topics) ? data.topics : [])
-      .slice(0, 5)
-      .map((t) => ({ title: String(t?.title || '').trim(), detail: String(t?.detail || '').trim() }))
-      .filter((t) => t.title || t.detail),
-    followups: (Array.isArray(data.followups) ? data.followups : []).map((x) => String(x).trim()).filter(Boolean),
-  };
-}
-
-module.exports = { summarizeChat, answerQuestion, extractWorkItems, digestDay, prompts };
+module.exports = { chatReply, buildMessages, systemPrompt, HISTORY_CHARS };

@@ -1,24 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- ตั้งให้ macOS ดึงไฟล์สำรองทุกคืนตี 3:37
      วิธีใช้:
-       1) แก้ /PATH/TO/line-group-bot ให้เป็นที่อยู่จริงของโฟลเดอร์นี้ (pwd)
-       2) cp launchd/backup.plist.example ~/Library/LaunchAgents/line-group-bot-backup.plist
-       3) launchctl load ~/Library/LaunchAgents/line-group-bot-backup.plist
-     เช็คผล: tail -f logs/backup.log   ·   เลิกใช้: launchctl unload ~/Library/LaunchAgents/line-group-bot-backup.plist -->
+       1) แก้ /PATH/TO/line-chatbot ให้เป็นที่อยู่จริงของโฟลเดอร์นี้ (pwd)
+       2) cp launchd/backup.plist.example ~/Library/LaunchAgents/line-chatbot-backup.plist
+       3) launchctl load ~/Library/LaunchAgents/line-chatbot-backup.plist
+     เช็คผล: tail -f logs/backup.log   ·   เลิกใช้: launchctl unload ~/Library/LaunchAgents/line-chatbot-backup.plist -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>line-group-bot-backup</string>
+  <key>Label</key><string>line-chatbot-backup</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/PATH/TO/line-group-bot/bin/backup-db.sh</string>
+    <string>/PATH/TO/line-chatbot/bin/backup-db.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict><key>PATH</key><string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>37</integer></dict>
-  <key>StandardOutPath</key><string>/PATH/TO/line-group-bot/logs/backup.log</string>
-  <key>StandardErrorPath</key><string>/PATH/TO/line-group-bot/logs/backup.log</string>
+  <key>StandardOutPath</key><string>/PATH/TO/line-chatbot/logs/backup.log</string>
+  <key>StandardErrorPath</key><string>/PATH/TO/line-chatbot/logs/backup.log</string>
 </dict>
 </plist>
