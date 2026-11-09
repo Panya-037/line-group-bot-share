@@ -16,7 +16,17 @@ function client() {
   return _client;
 }
 
-const MODEL = () => process.env.AI_MODEL || 'google/gemini-2.5-flash';
+// ค่าเริ่มต้นเลือกจากการทดสอบ 7 โมเดลกับเคสจริงของบอทนี้ (9 พ.ย. 69 — คิดยอด ค่าส่ง ของที่ไม่มี เลขบัญชีที่ยังไม่กรอก สลิป ขอลด แก้ราคา)
+//   deepseek-v4.1-flash ผ่านครบ ถูกสุดในตัวที่ผ่าน (~$0.00026/คำตอบ ราวครึ่งของ gemini-2.5-flash)
+//   ร้านสุขภาพ/ความงาม แนะนำ anthropic/claude-haiku-5.5 (ระวังเรื่องเคลมสรรพคุณดีกว่า)
+const MODEL = () => process.env.AI_MODEL || 'deepseek/deepseek-v4.1-flash';
+// ตัวหลักล่มหรือติดคิว (429/5xx) → OpenRouter สลับไปตัวสำรองให้เอง บอทจะได้ไม่เงียบ · ตั้ง AI_FALLBACK_MODEL=none เพื่อปิด
+const FALLBACK = () => process.env.AI_FALLBACK_MODEL || 'google/gemini-3.1-flash-lite';
+function modelParams() {
+  const main = MODEL();
+  const backup = FALLBACK();
+  return backup && backup !== 'none' && backup !== main ? { model: main, models: [main, backup] } : { model: main };
+}
 const HISTORY_CHARS = 6000; // ลูกค้า: จำบทสนทนาย้อนหลังได้ราวนี้ — เกินตัดของเก่าสุดทิ้ง
 const OWNER_HISTORY_CHARS = 3000; // เจ้าของ: จำแค่ที่เพิ่งถามกัน (ข้อมูลลูกค้าส่งแยกไปทุกครั้งอยู่แล้ว)
 
@@ -68,7 +78,7 @@ function buildMessages(rows, { name = '', now, maxChars = HISTORY_CHARS, briefTe
 
 async function chatReply(rows, { name = '', briefText } = {}) {
   const res = await client().chat.completions.create({
-    model: MODEL(),
+    ...modelParams(),
     messages: buildMessages(rows, { name, briefText }),
   });
   return res.choices[0]?.message?.content?.trim() || '';
@@ -106,7 +116,9 @@ function parseOwnerJSON(raw) {
   try {
     const data = JSON.parse(m ? m[0] : raw);
     const reply = typeof data.reply === 'string' ? data.reply.trim() : '';
-    const newBrief = typeof data.new_brief === 'string' && data.new_brief.trim() ? data.new_brief.trim() : null;
+    // บางโมเดลก๊อปเครื่องหมาย <<< >>> ที่ครอบคำสั่งใน prompt ติดมาด้วย (เจอตอนทดสอบ) → ตัดทิ้งก่อนเทียบ
+    const cleaned = typeof data.new_brief === 'string' ? data.new_brief.replace(/^\s*<<<\s*\n?/, '').replace(/\n?\s*>>>\s*$/, '').trim() : '';
+    const newBrief = cleaned || null;
     return { reply, newBrief };
   } catch {
     return { reply: String(raw || '').trim(), newBrief: null }; // ไม่ใช่ JSON = ถือเป็นคำตอบธรรมดา ไม่แตะคำสั่ง
@@ -115,7 +127,7 @@ function parseOwnerJSON(raw) {
 
 async function ownerReply(rows, { name = '', briefText = '', report = '' } = {}) {
   const res = await client().chat.completions.create({
-    model: MODEL(),
+    ...modelParams(),
     messages: [
       { role: 'system', content: ownerPrompt({ name, briefText, report }) },
       ...toTurns(rows, OWNER_HISTORY_CHARS),
@@ -127,6 +139,7 @@ async function ownerReply(rows, { name = '', briefText = '', report = '' } = {})
 }
 
 module.exports = {
+  modelParams,
   chatReply,
   ownerReply,
   buildMessages,

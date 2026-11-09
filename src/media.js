@@ -14,7 +14,9 @@ function client() {
   });
   return _client;
 }
-const VISION_MODEL = () => process.env.VISION_MODEL || 'google/gemini-2.5-flash';
+// อ่านรูป/ฟังเสียง/ดูวิดีโอ — ต้องเป็นโมเดลที่รับเสียงและวิดีโอได้ (ตระกูล gemini)
+// gemini-3.1-flash-lite: ถอดเสียงไทยได้เท่า 2.5-flash แต่ไวกว่า 2–3 เท่า ราคาครึ่งเดียว (ทดสอบ 9 พ.ย. 69) · อ่านสลิปไทยจริงถูก 10/10
+const VISION_MODEL = () => process.env.VISION_MODEL || 'google/gemini-3.1-flash-lite';
 
 const MAX_BYTES = 15 * 1024 * 1024; // เกิน 15MB ไม่โหลด (กันไฟล์ยักษ์)
 

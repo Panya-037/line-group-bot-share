@@ -16,7 +16,7 @@ const dayjs = require('../src/time');
 const db = require('../src/db');
 const branding = require('../src/branding');
 const brief = require('../src/brief');
-const { buildMessages, systemPrompt, ownerPrompt, parseOwnerJSON } = require('../src/ai');
+const { buildMessages, systemPrompt, ownerPrompt, parseOwnerJSON, modelParams } = require('../src/ai');
 const owner = require('../src/owner');
 const { createBot, placeholder, dailyLimit, greeting, chunk } = require('../src/bot');
 
@@ -136,6 +136,14 @@ async function main() {
   check('JSON ห่อ ```json มา', parseOwnerJSON('```json\n{"reply":"แก้แล้ว","new_brief":"ใหม่"}\n```').newBrief === 'ใหม่');
   check('ไม่ใช่ JSON = ถือเป็นคำตอบ ไม่แตะคำสั่ง', (() => { const p = parseOwnerJSON('สวัสดีค่ะ'); return p.reply === 'สวัสดีค่ะ' && p.newBrief === null; })());
   check('new_brief ว่าง = ไม่แก้', parseOwnerJSON('{"reply":"x","new_brief":"  "}').newBrief === null);
+  check('ร่างที่ก๊อป <<< >>> ติดมา → ตัดทิ้ง', parseOwnerJSON('{"reply":"x","new_brief":"<<<\\nร้านมะลิ\\n- ราคา 130\\n>>>"}').newBrief === 'ร้านมะลิ\n- ราคา 130');
+
+  // ===== โมเดลค่าเริ่มต้น + ตัวสำรอง =====
+  const withEnv = (env, fn) => { const keep = {}; for (const k of Object.keys(env)) { keep[k] = process.env[k]; if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; } try { return fn(); } finally { for (const k of Object.keys(keep)) { if (keep[k] === undefined) delete process.env[k]; else process.env[k] = keep[k]; } } };
+  check('ค่าเริ่มต้น = deepseek + สำรอง gemini-3.1-flash-lite', withEnv({ AI_MODEL: undefined, AI_FALLBACK_MODEL: undefined }, () => JSON.stringify(modelParams())) === JSON.stringify({ model: 'deepseek/deepseek-v4.1-flash', models: ['deepseek/deepseek-v4.1-flash', 'google/gemini-3.1-flash-lite'] }));
+  check('AI_MODEL เปลี่ยนตัวหลักได้', withEnv({ AI_MODEL: 'anthropic/claude-haiku-5.5', AI_FALLBACK_MODEL: undefined }, () => modelParams().models[0]) === 'anthropic/claude-haiku-5.5');
+  check('AI_FALLBACK_MODEL=none → ไม่มีตัวสำรอง', withEnv({ AI_MODEL: undefined, AI_FALLBACK_MODEL: 'none' }, () => modelParams().models) === undefined);
+  check('ตัวหลักกับตัวสำรองเป็นตัวเดียวกัน → ไม่ใส่ซ้ำ', withEnv({ AI_MODEL: 'google/gemini-3.1-flash-lite', AI_FALLBACK_MODEL: undefined }, () => modelParams().models) === undefined);
 
   // ===== ความจำบทสนทนา → messages ของ AI =====
   const ts = '2026-11-09 03:00:00'; // = 10:00 เวลาไทย
