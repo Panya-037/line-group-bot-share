@@ -7,3 +7,5 @@ logs/
 backups/
 .DS_Store
 README.md
+docs/
+test/

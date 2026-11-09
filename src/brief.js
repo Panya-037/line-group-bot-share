@@ -1,16 +1,17 @@
 // คำสั่งประจำตัวบอท — เจ้าของเขียนเองว่าบอททำหน้าที่อะไร รู้ข้อมูลอะไร ห้ามทำอะไร
 //
-//   ไฟล์ brief.txt (ข้างๆ package.json) — ทางหลัก เขียนยาวหลายบรรทัดได้ บรรทัดขึ้นต้น # = หมายเหตุ ไม่ส่งให้ AI
-//   BOT_BRIEF=...               — คำสั่งสั้นบรรทัดเดียวใน .env (ตั้งไว้ = ชนะไฟล์)
-//   BOT_BRIEF_FILE=./brief-shop.txt — ชี้ไฟล์อื่นแทน brief.txt
-//
-// ไม่ตั้งอะไรเลย = เป็นผู้ช่วยทั่วไป คุยได้ทุกเรื่อง แต่ไม่รู้ข้อมูลเฉพาะของเจ้าของ
+// แก้ได้ 2 ทาง อันไหนแก้ทีหลังสุด บอทใช้อันนั้น:
+//   1) ไฟล์ brief.txt (ข้างๆ package.json) หรือ BOT_BRIEF ใน .env — อ่านตอนบูต ถ้าไฟล์เปลี่ยนจะกลายเป็นฉบับล่าสุด
+//   2) เจ้าของพิมพ์สั่งแก้ในแชท (โหมดเจ้าของ) — บันทึกลงฐานข้อมูลเป็นฉบับใหม่ ใช้ทันทีไม่ต้องรีสตาร์ท
+// ทุกฉบับเก็บไว้ในตาราง brief_versions → เจ้าของพิมพ์ "ย้อนกลับ" ได้
 const fs = require('fs');
 const path = require('path');
 
 // กันคำสั่งยาวจนกิน prompt — ทุกข้อความที่บอทตอบต้องส่งคำสั่งนี้ไปด้วย ยาว = แพงขึ้นทุกครั้ง
 const MAX_CHARS = 8000;
 const DEFAULT_FILE = path.join(__dirname, '..', 'brief.txt');
+// ช่องที่แบบสำเร็จรูปใน briefs/ เว้นไว้ให้กรอก เช่น 〔ชื่อร้าน〕 — ยังเหลือ = เตือน
+const PLACEHOLDER = /〔[^〕]*〕/g;
 
 function readBriefFile(file) {
   try {
@@ -31,7 +32,7 @@ function clean(text) {
     .trim();
 }
 
-// ฟังก์ชันบริสุทธิ์ (รับ env + ตัวอ่านไฟล์) ให้เทสเรียกได้โดยไม่ยุ่ง process.env / ดิสก์จริง
+// อ่านจาก .env / ไฟล์ (ฟังก์ชันบริสุทธิ์ รับ env + ตัวอ่านไฟล์ ให้เทสเรียกได้โดยไม่ยุ่งดิสก์จริง)
 function resolve(env = {}, { readFile = readBriefFile } = {}) {
   let source = 'none';
   let text = clean(env.BOT_BRIEF);
@@ -46,19 +47,66 @@ function resolve(env = {}, { readFile = readBriefFile } = {}) {
     text = text.slice(0, MAX_CHARS).trim();
     truncated = true;
   }
-  return {
-    TEXT: text,
-    SOURCE: source, // 'env' | 'file' | 'none'
-    TRUNCATED: truncated,
-    // ก้อนข้อความต่อท้าย system prompt — ไม่มีคำสั่ง = สตริงว่าง
-    block: () =>
-      text
-        ? `\n\nคำสั่งจากเจ้าของ — หน้าที่ ข้อมูล และกติกาของคุณ ยึดตามนี้เสมอ:\n${text}`
-        : '',
-  };
+  return { TEXT: text, SOURCE: source, TRUNCATED: truncated };
 }
 
-const current = resolve(process.env);
-if (current.TRUNCATED) console.warn(`⚠️  คำสั่งประจำตัวยาวเกิน ${MAX_CHARS} ตัวอักษร — ตัดส่วนท้ายทิ้ง`);
+function placeholders(text) {
+  return [...new Set(String(text || '').match(PLACEHOLDER) || [])];
+}
 
-module.exports = { ...current, resolve, clean, MAX_CHARS, DEFAULT_FILE };
+// ฉบับที่ส่งให้ AI ฝั่งลูกค้า: ช่อง 〔...〕 ที่ยังไม่กรอก → "(ยังไม่มีข้อมูล)" ให้ชัดว่าไม่มีจริง
+// ทดสอบแล้ว: ส่ง 〔เลขบัญชี〕 ไปตรงๆ โมเดลพิมพ์ให้ลูกค้าเห็น · ตัดบรรทัดทิ้ง โมเดลแต่งเลขบัญชีปลอมขึ้นมาเอง
+// โหมดเจ้าของยังเห็น 〔...〕 ครบ จะได้สั่งเติมได้
+const UNKNOWN = '(ยังไม่มีข้อมูล)';
+function forCustomers(text) {
+  return String(text || '').replace(PLACEHOLDER, UNKNOWN);
+}
+// ด่านสุดท้ายก่อนส่งถึงลูกค้า — หลุดมาก็แทนด้วยคำกลางๆ
+// บรรทัดที่หลุดหลายจุด (เช่น "โอนเข้า ? เลขที่ ? ชื่อบัญชี ?") → แทนทั้งบรรทัด อ่านรู้เรื่องกว่า
+const PENDING = '(ทางร้านจะแจ้งให้)';
+function scrubPlaceholders(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => {
+      const marked = line.replace(PLACEHOLDER, PENDING).split(UNKNOWN).join(PENDING);
+      const hits = marked.split(PENDING).length - 1;
+      return hits >= 2 ? 'เรื่องนี้เดี๋ยวทางร้านแจ้งรายละเอียดให้นะคะ' : marked;
+    })
+    .join('\n');
+}
+
+// ก้อนข้อความต่อท้าย system prompt — ไม่มีคำสั่ง = สตริงว่าง
+function block(text) {
+  return text ? `\n\nคำสั่งจากเจ้าของ — หน้าที่ ข้อมูล และกติกาของคุณ ยึดตามนี้เสมอ:\n${text}` : '';
+}
+
+// ตอนบูต: ไฟล์/ .env ไม่ตรงกับฉบับไฟล์ล่าสุดที่จำไว้ = มีคนแก้ไฟล์ → บันทึกเป็นฉบับใหม่ (ชนะของที่แก้ในแชทก่อนหน้า)
+// Vercel บูตบ่อย (ทุก cold start) — เขียนเป็นคำสั่งเดียวแบบมีเงื่อนไข สองตัวบูตพร้อมกันก็ไม่ได้ฉบับซ้ำ
+async function syncBoot(db = require('./db'), env = process.env, opts) {
+  const fromFile = resolve(env, opts);
+  if (fromFile.TRUNCATED) console.warn(`⚠️  คำสั่งประจำตัวยาวเกิน ${MAX_CHARS} ตัวอักษร — ตัดส่วนท้ายทิ้ง`);
+  if (fromFile.TEXT) await db.addFileBriefIfChanged(fromFile.TEXT);
+  const now = await current(db);
+  const left = placeholders(now.TEXT);
+  if (left.length) console.warn(`⚠️  คำสั่งประจำตัวยังมีช่องที่ไม่ได้กรอก: ${left.join(' ')}`);
+  return now;
+}
+
+// ฉบับที่ใช้อยู่ = ฉบับล่าสุดในฐานข้อมูล
+async function current(db = require('./db')) {
+  const row = await db.latestBrief();
+  return row ? { TEXT: row.text, SOURCE: row.source, AT: row.created_at } : { TEXT: '', SOURCE: 'none', AT: null };
+}
+
+module.exports = {
+  resolve,
+  clean,
+  block,
+  placeholders,
+  forCustomers,
+  scrubPlaceholders,
+  syncBoot,
+  current,
+  MAX_CHARS,
+  DEFAULT_FILE,
+};

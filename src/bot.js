@@ -1,8 +1,12 @@
 // ตัวรับ event จาก LINE — คุยแชทส่วนตัว (1:1) เท่านั้น
 // แยกเป็น factory รับ client / db / ai / media จากข้างนอก เทสจะได้ส่งของปลอมเข้ามาได้โดยไม่ต้องต่อ LINE จริง
 const { BOT, SELF, EMOJI, say } = require('./branding');
+const brief = require('./brief');
+const owner = require('./owner');
+const { guardNumbers } = require('./guard');
 
 const MEDIA_TYPES = ['image', 'audio', 'video', 'file'];
+const MAX_TEXT = 4900; // LINE รับข้อความละไม่เกิน 5,000 ตัวอักษร
 
 // ข้อความที่ไม่ใช่ text → เก็บ placeholder ไว้ก่อน (สื่อจะถูกอ่านจริงแล้วเขียนทับ)
 function placeholder(message) {
@@ -26,7 +30,7 @@ function placeholder(message) {
   }
 }
 
-// เพดานข้อความต่อคนต่อวัน (กันค่า AI บาน) — DAILY_LIMIT=0 คือไม่จำกัด
+// เพดานข้อความต่อคนต่อวัน (กันค่า AI บาน) — DAILY_LIMIT=0 คือไม่จำกัด · เจ้าของไม่นับ
 function dailyLimit(env = process.env) {
   const n = parseInt(env.DAILY_LIMIT ?? '', 10);
   return Number.isFinite(n) && n >= 0 ? n : 100;
@@ -39,19 +43,33 @@ function greeting(env = process.env) {
   );
 }
 
+// ข้อความยาว (เช่น ดูหน้าที่ 8,000 ตัวอักษร) → ตัดเป็นหลายกล่อง ตัดตรงขึ้นบรรทัดใหม่ถ้าได้ · LINE รับได้ 5 กล่องต่อครั้ง
+function chunk(text, size = MAX_TEXT, max = 5) {
+  const parts = [];
+  let rest = String(text);
+  while (rest.length > size && parts.length < max - 1) {
+    let cut = rest.lastIndexOf('\n', size);
+    if (cut < size * 0.5) cut = size;
+    parts.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  parts.push(rest.slice(0, size));
+  return parts;
+}
+
 function createBot({ client, db = require('./db'), ai = require('./ai'), media = require('./media'), env = process.env }) {
-  const textMsg = (t) => ({ type: 'text', text: say(t).slice(0, 4900) });
+  const toMessages = (t) => chunk(say(t)).map((text) => ({ type: 'text', text }));
 
   // ตอบด้วย replyToken (ฟรี) — หมดอายุ/ใช้ไม่ได้ ค่อยถอยไป push (กินโควต้าฟรี 300/เดือน) จะได้ไม่เงียบหาย
   async function send(replyToken, to, t) {
     try {
-      await client.replyMessage({ replyToken, messages: [textMsg(t)] });
+      await client.replyMessage({ replyToken, messages: toMessages(t) });
       return 'reply';
     } catch (e) {
       console.error('[reply]', e.message);
       if (!to) return 'fail';
       try {
-        await client.pushMessage({ to, messages: [textMsg(t)] });
+        await client.pushMessage({ to, messages: toMessages(t) });
         return 'push';
       } catch (e2) {
         console.error('[push]', e2.message);
@@ -62,14 +80,14 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
 
   // จำชื่อคนคุย — ยังไม่รู้ชื่อค่อยยิง API (ได้เฉพาะคนที่แอดบอทเป็นเพื่อน)
   async function rememberUser(userId) {
-    if (db.userName(userId)) return;
+    if (await db.userName(userId)) return;
     let name = null;
     try {
       name = (await client.getProfile(userId))?.displayName || null;
     } catch {
       /* โปรไฟล์ไม่เปิด — ข้าม */
     }
-    db.upsertUser(userId, name);
+    await db.upsertUser(userId, name);
   }
 
   async function leave(src) {
@@ -81,6 +99,53 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
     }
   }
 
+  // จุดกำลังพิมพ์... ให้คนรู้ว่าบอทรับเรื่องแล้ว (สื่อ/โหมดเจ้าของใช้เวลานานกว่า)
+  function loading(userId, seconds) {
+    return Promise.resolve(client.showLoadingAnimation?.({ chatId: userId, loadingSeconds: seconds })).catch(() => {});
+  }
+
+  // เก็บข้อความ (สื่อ = อ่านก่อนแล้วเขียนทับ placeholder)
+  async function store(userId, msg, lane) {
+    if (msg.type === 'text') return db.logMessage(userId, 'user', msg.id, 'text', msg.text, lane);
+    const rowId = await db.logMessage(userId, 'user', msg.id, msg.type, placeholder(msg), lane);
+    if (MEDIA_TYPES.includes(msg.type)) {
+      const read = await media.readMedia(msg);
+      if (read) await db.updateMessageText(rowId, read);
+    }
+    return rowId;
+  }
+
+  // ---------- เจ้าของ ----------
+  async function ownerTurn(event, userId, msg, text) {
+    if (text) {
+      const cmd = await owner.ownerCommand(userId, text, db);
+      if (cmd) {
+        await send(event.replyToken, userId, cmd);
+        return 'owner-command';
+      }
+    }
+    await loading(userId, 60);
+    await store(userId, msg, 'owner');
+    let out;
+    try {
+      const history = await db.recentMessages(userId, 30, 'owner');
+      const briefText = (await brief.current(db)).TEXT;
+      const report = await owner.buildReport(db);
+      const { reply, newBrief } = await ai.ownerReply(history, { name: await db.userName(userId), briefText, report });
+      // เจ้าของก็ต้องไม่ได้เบอร์/เลขบัญชีที่ AI แต่ง (เช็คเฉพาะคำตอบ ส่วนจุดเปลี่ยนในคำสั่งโค้ดคิดเอง)
+      out = guardNumbers(reply, [briefText, report, ...history.map((r) => r.text)]).text;
+      out = out || `${SELF}ยังตอบเรื่องนี้ไม่ได้ค่ะ ลองถามอีกแบบดูนะคะ`;
+      if (newBrief) out = await owner.proposeBrief(userId, out, newBrief, db);
+    } catch (e) {
+      console.error('[owner-ai]', e.message);
+      await send(event.replyToken, userId, `ขอโทษนะคะ ระบบ${SELF}สะดุดนิดหน่อย ลองพิมพ์ใหม่อีกทีได้เลยค่ะ 🙏`);
+      return 'error';
+    }
+    await db.logMessage(userId, 'bot', null, 'text', say(out), 'owner');
+    await send(event.replyToken, userId, out);
+    return 'owner-answered';
+  }
+
   async function handleEvent(event) {
     const src = event.source || {};
 
@@ -90,7 +155,7 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
         await client
           .replyMessage({
             replyToken: event.replyToken,
-            messages: [textMsg(`${BOT}คุยได้เฉพาะแชทส่วนตัวนะคะ แอดเพื่อนแล้วทักมาได้เลยค่ะ ${EMOJI}`)],
+            messages: toMessages(`${BOT}คุยได้เฉพาะแชทส่วนตัวนะคะ แอดเพื่อนแล้วทักมาได้เลยค่ะ ${EMOJI}`),
           })
           .catch(() => {});
       }
@@ -109,56 +174,64 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
     if (event.type === 'follow') {
       await rememberUser(userId);
       const hi = greeting(env);
-      db.logMessage(userId, 'bot', null, 'text', say(hi));
+      await db.logMessage(userId, 'bot', null, 'text', say(hi));
       await send(event.replyToken, null, hi);
       return 'greeted';
     }
 
     // --- คนกด unsend → ลบตาม ---
     if (event.type === 'unsend' && event.unsend?.messageId) {
-      db.deleteByLineMsgId(event.unsend.messageId);
+      await db.deleteByLineMsgId(event.unsend.messageId);
       return 'unsent';
     }
 
     if (event.type !== 'message') return 'ignored';
     const msg = event.message;
+    const text = msg.type === 'text' ? msg.text.trim() : '';
     await rememberUser(userId);
 
-    // --- เพดานต่อวัน: ครบแล้วตอบสั้นๆ ไม่เรียก AI ---
+    // --- พิมพ์รหัสเจ้าของถูก → เป็นเจ้าของ (ไม่เก็บรหัสลงฐานข้อมูล ไม่ส่งให้ AI) ---
+    if (text && owner.isOwnerCode(text, env)) {
+      await db.addOwner(userId);
+      console.log(`[owner] เพิ่มเจ้าของ ${userId}`);
+      await send(event.replyToken, userId, `ยินดีต้อนรับค่ะ ${SELF}จำได้แล้วว่าคุณเป็นเจ้าของ\n\n${owner.menuText()}`);
+      return 'owner-added';
+    }
+    const mode = await db.ownerMode(userId); // null = ลูกค้า · owner · customer (เจ้าของทดลองคุยแบบลูกค้า)
+    if (mode && text === 'กลับโหมดเจ้าของ') {
+      await db.setOwnerMode(userId, 'owner');
+      await send(event.replyToken, userId, `กลับมาโหมดเจ้าของแล้วค่ะ\n\n${owner.menuText()}`);
+      return 'owner-mode';
+    }
+    if (mode === 'owner') return ownerTurn(event, userId, msg, text);
+
+    // --- เพดานต่อวัน: ครบแล้วตอบสั้นๆ ไม่เรียก AI (เจ้าของไม่นับ) ---
     const limit = dailyLimit(env);
-    if (limit && db.userMessagesToday(userId) >= limit) {
+    if (!mode && limit && (await db.userMessagesToday(userId)) >= limit) {
       await send(event.replyToken, null, `วันนี้คุยกับ${SELF}ครบ ${limit} ข้อความแล้วค่ะ พรุ่งนี้ทักมาใหม่ได้เลยนะคะ 🙏`);
       return 'limit';
     }
 
-    // จุดกำลังพิมพ์... ให้คนรู้ว่าบอทรับเรื่องแล้ว (สื่อใช้เวลานานกว่า)
-    await Promise.resolve(
-      client.showLoadingAnimation?.({ chatId: userId, loadingSeconds: MEDIA_TYPES.includes(msg.type) ? 60 : 20 }),
-    ).catch(() => {});
-
-    // --- เก็บข้อความ (สื่อ = อ่านก่อนแล้วเขียนทับ placeholder) ---
-    if (msg.type === 'text') {
-      db.logMessage(userId, 'user', msg.id, 'text', msg.text);
-    } else {
-      const rowId = db.logMessage(userId, 'user', msg.id, msg.type, placeholder(msg));
-      if (MEDIA_TYPES.includes(msg.type)) {
-        const read = await media.readMedia(msg);
-        if (read) db.updateMessageText(rowId, read);
-      }
-    }
+    await loading(userId, MEDIA_TYPES.includes(msg.type) ? 60 : 20);
+    await store(userId, msg, 'chat');
 
     // --- ให้ AI ตอบจากคำสั่งประจำตัว + บทสนทนาที่ผ่านมา ---
+    const history = await db.recentMessages(userId);
+    const briefText = (await brief.current(db)).TEXT;
     let answer;
     try {
-      answer = await ai.chatReply(db.recentMessages(userId), { name: db.userName(userId) });
+      answer = await ai.chatReply(history, { name: await db.userName(userId), briefText });
     } catch (e) {
       console.error('[ai]', e.message);
       await send(event.replyToken, userId, `ขอโทษนะคะ ระบบ${SELF}สะดุดนิดหน่อย ลองพิมพ์ใหม่อีกทีได้เลยค่ะ 🙏`);
       return 'error';
     }
     if (!answer) answer = `ขอโทษค่ะ ${SELF}ยังตอบเรื่องนี้ไม่ได้ ลองพิมพ์อีกแบบดูนะคะ`;
-    const out = say(answer).slice(0, 4900);
-    db.logMessage(userId, 'bot', null, 'text', out);
+    // ด่านก่อนถึงลูกค้า: ช่อง 〔...〕 ที่ยังไม่กรอก + เลขบัญชี/เบอร์ที่ไม่มีอยู่จริงในข้อมูล
+    const guarded = guardNumbers(brief.scrubPlaceholders(answer), [briefText, ...history.map((r) => r.text)]);
+    if (guarded.removed.length) console.warn(`[guard] ตัดตัวเลขที่ไม่มีในข้อมูลออก: ${guarded.removed.join(', ')}`);
+    const out = say(guarded.text);
+    await db.logMessage(userId, 'bot', null, 'text', out);
     await send(event.replyToken, userId, out);
     return 'answered';
   }
@@ -166,4 +239,4 @@ function createBot({ client, db = require('./db'), ai = require('./ai'), media =
   return { handleEvent };
 }
 
-module.exports = { createBot, placeholder, dailyLimit, greeting };
+module.exports = { createBot, placeholder, dailyLimit, greeting, chunk };

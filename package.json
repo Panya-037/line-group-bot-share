@@ -1,7 +1,7 @@
 {
   "name": "line-chatbot",
-  "version": "1.0.0",
-  "description": "แชทบอทส่วนตัวใน LINE — ตั้งชื่อเองได้ สั่งหน้าที่ด้วยไฟล์ brief.txt จำบทสนทนา อ่านรูป/เสียง/ไฟล์",
+  "version": "2.0.0",
+  "description": "แชทบอทส่วนตัวใน LINE — สั่งหน้าที่ด้วย brief.txt มีแบบพร้อมใช้ 7 ธุรกิจ โหมดเจ้าของถามสรุปและแก้ราคาผ่านแชท รันบน Railway หรือ Vercel",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
@@ -14,14 +14,18 @@
     "chatbot",
     "messaging-api",
     "openrouter",
-    "thai"
+    "thai",
+    "vercel",
+    "railway",
+    "turso"
   ],
   "author": "",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "@line/bot-sdk": "^11.2.0",
-    "better-sqlite3": "^12.11.1",
+    "@vercel/functions": "^3.11.0",
     "dayjs": "^1.11.21",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
